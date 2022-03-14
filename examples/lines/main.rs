@@ -3,8 +3,8 @@ use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
-use rasterizer::{Color, Framebuffer};
 use rasterizer::presenter::WgpuPresenter;
+use rasterizer::{line_bresenham, Color, ColorBuffer, ListShapeAssembpler, Pipeline, VertexOutput};
 
 fn main() {
     let width = 800;
@@ -16,8 +16,17 @@ fn main() {
         .build(&event_loop)
         .unwrap();
 
-    let mut framebuffer = Framebuffer::new(width, height);
+    let mut framebuffer = ColorBuffer::new(width, height);
     let mut presenter = WgpuPresenter::new(&window, width, height, true);
+    let mut pipeline = Pipeline::new(
+        |vertex: glam::Vec4| VertexOutput {
+            position: vertex,
+            attributes: [],
+        },
+        ListShapeAssembpler::new(),
+        line_bresenham,
+        |_| Color::new(1.0, 1.0, 1.0, 1.0),
+    );
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent { event, .. } => match event {
@@ -31,12 +40,12 @@ fn main() {
             _ => (),
         },
         Event::MainEventsCleared => {
-            framebuffer[[0, 0]] = Color {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 1.0,
-            };
+            framebuffer.clear(Color::default());
+            let vertex_buffer = [
+                glam::vec4(-1.0, -1.0, 0.0, 1.0),
+                glam::vec4(1.0, 1.0, 2.0, 2.0),
+            ];
+            pipeline.draw(&vertex_buffer, &mut framebuffer);
             presenter.present(&framebuffer);
         }
         _ => (),

@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 use futures::executor::block_on;
 use wgpu::util::DeviceExt;
 
-use crate::{Color, Framebuffer};
+use crate::{Color, ColorBuffer};
 
 pub struct WgpuPresenter<'a> {
     device: wgpu::Device,
@@ -29,7 +29,7 @@ impl WgpuPresenter<'_> {
         let instance = wgpu::Instance::new(wgpu::Backends::all());
         let surface = unsafe { instance.create_surface(&window) };
         let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: wgpu::PowerPreference::LowPower,
             force_fallback_adapter: false,
             compatible_surface: Some(&surface),
         }))
@@ -234,7 +234,7 @@ fn fs_main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
         })
     }
 
-    pub fn present(&self, framebuffer: &Framebuffer) {
+    pub fn present(&self, framebuffer: &ColorBuffer) {
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.texture,
