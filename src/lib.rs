@@ -237,12 +237,12 @@ impl From<&Color> for [f32; 4] {
 /// - Fragment shading
 ///
 /// It is possible that number and order of stages will change as development progresses
-pub struct Pipeline<VI, VS, C, SA, R, DT, FS, const A: usize, const S: usize>
+pub struct Pipeline<VI, VS, SA, C, R, DT, FS, const A: usize, const S: usize>
 where
     VI: Copy,
     VS: FnMut(VI) -> VertexOutput<A> + Copy,
+    SA: ShapeAssembler<u32, S>,
     C: FnMut([VertexOutput<A>; S]) -> Vec<[VertexOutput<A>; S]>,
-    SA: ShapeAssembler<VertexOutput<A>, S>,
     R: Rasterizer<A, S>,
     DT: FnMut(f32, f32) -> bool,
     FS: FnMut(FragmentInput<A>) -> Color,
@@ -257,13 +257,13 @@ where
     vertex_input_pd: PhantomData<VI>,
 }
 
-impl<VI, VS, C, SA, R, DT, FS, const A: usize, const S: usize>
-    Pipeline<VI, VS, C, SA, R, DT, FS, A, S>
+impl<VI, VS, SA, C, R, DT, FS, const A: usize, const S: usize>
+    Pipeline<VI, VS, SA, C, R, DT, FS, A, S>
 where
     VI: Copy,
     VS: FnMut(VI) -> VertexOutput<A> + Copy,
+    SA: ShapeAssembler<u32, S>,
     C: FnMut([VertexOutput<A>; S]) -> Vec<[VertexOutput<A>; S]>,
-    SA: ShapeAssembler<VertexOutput<A>, S>,
     R: Rasterizer<A, S>,
     DT: FnMut(f32, f32) -> bool,
     FS: FnMut(FragmentInput<A>) -> Color,
@@ -288,7 +288,12 @@ where
         }
     }
 
-    pub fn draw(&mut self, vertex_buffer: &[VI], framebuffer: &mut impl RenderBuffer) {
+    pub fn draw_indexed(
+        &mut self,
+        vertex_buffer: &[VI],
+        index_buffer: &[u32],
+        framebuffer: &mut impl RenderBuffer,
+    ) {
         let width = framebuffer.width();
         let height = framebuffer.height();
         let mut vertex_shader = self.vertex_shader;
@@ -305,11 +310,17 @@ where
                 }
             })
         };
+
         self.rasterizer.set_screen_size(width, height);
-        vertex_buffer
+        let shaded_vertices = vertex_buffer
             .into_iter()
             .map(|&vertex| vertex_shader(vertex))
+            .collect::<Vec<_>>();
+        index_buffer
+            .into_iter()
+            .map(u32::to_owned)
             .assemble_shapes(self.shape_assembler)
+            .map(|shape| shape.map(|i| shaded_vertices[i as usize]))
             .map(|shape| (self.clipper)(shape).into_iter())
             .flatten()
             .map(perspective_divide)
@@ -325,6 +336,11 @@ where
                     framebuffer[position] = (self.fragment_shader)(fragment_input);
                 }
             });
+    }
+
+    pub fn draw(&mut self, vertex_buffer: &[VI], framebuffer: &mut impl RenderBuffer) {
+        let index_buffer = (0..vertex_buffer.len() as u32).collect::<Vec<_>>();
+        self.draw_indexed(vertex_buffer, &index_buffer, framebuffer);
     }
 }
 
