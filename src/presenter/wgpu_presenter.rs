@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 use futures::executor::block_on;
 use wgpu::util::DeviceExt;
 
-use crate::{Color, ColorBuffer};
+use crate::{Color, RenderBuffer};
 
 pub struct WgpuPresenter<'a> {
     device: wgpu::Device,
@@ -234,7 +234,7 @@ fn fs_main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
         })
     }
 
-    pub fn present(&self, framebuffer: &ColorBuffer) {
+    pub fn present(&self, framebuffer: &impl RenderBuffer) {
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.texture,
@@ -245,14 +245,16 @@ fn fs_main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
             framebuffer.color_slice(),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: NonZeroU32::new(framebuffer.width * mem::size_of::<Color>() as u32),
+                bytes_per_row: NonZeroU32::new(
+                    framebuffer.width() * mem::size_of::<Color>() as u32,
+                ),
                 rows_per_image: NonZeroU32::new(
-                    framebuffer.height * mem::size_of::<Color>() as u32,
+                    framebuffer.height() * mem::size_of::<Color>() as u32,
                 ),
             },
             wgpu::Extent3d {
-                width: framebuffer.width,
-                height: framebuffer.height,
+                width: framebuffer.width(),
+                height: framebuffer.height(),
                 depth_or_array_layers: 1,
             },
         );

@@ -3,8 +3,10 @@ use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
+use rasterizer::clipper;
 use rasterizer::presenter::WgpuPresenter;
-use rasterizer::{line_bresenham, Color, ColorBuffer, ListShapeAssembpler, Pipeline, VertexOutput};
+use rasterizer::rasterizer::BresenhamLineRasterizer;
+use rasterizer::{Color, ColorDepthBuffer, Pipeline, StripShapeAssembler, VertexOutput};
 
 fn main() {
     let width = 800;
@@ -16,15 +18,17 @@ fn main() {
         .build(&event_loop)
         .unwrap();
 
-    let mut framebuffer = ColorBuffer::new(width, height);
+    let mut framebuffer = ColorDepthBuffer::new(width, height);
     let mut presenter = WgpuPresenter::new(&window, width, height, true);
     let mut pipeline = Pipeline::new(
         |vertex: glam::Vec4| VertexOutput {
             position: vertex,
             attributes: [],
         },
-        ListShapeAssembpler::new(),
-        line_bresenham,
+        StripShapeAssembler::new(),
+        clipper::simple_line,
+        BresenhamLineRasterizer::new(),
+        |current, new| new <= current,
         |_| Color::new(1.0, 1.0, 1.0, 1.0),
     );
 
@@ -40,10 +44,14 @@ fn main() {
             _ => (),
         },
         Event::MainEventsCleared => {
-            framebuffer.clear(Color::default());
+            framebuffer.clear_color(Color::default());
+            framebuffer.clear_depth(f32::INFINITY);
             let vertex_buffer = [
-                glam::vec4(-1.0, -1.0, 0.0, 1.0),
-                glam::vec4(1.0, 1.0, 2.0, 2.0),
+                glam::vec4(-0.5, -0.5, 0.0, 1.0),
+                glam::vec4(-0.5, 0.5, 0.0, 1.0),
+                glam::vec4(0.5, 0.5, 0.0, 1.0),
+                glam::vec4(0.5, -0.5, 0.0, 1.0),
+                glam::vec4(-0.5, -0.5, 0.0, 1.0),
             ];
             pipeline.draw(&vertex_buffer, &mut framebuffer);
             presenter.present(&framebuffer);
