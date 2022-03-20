@@ -61,6 +61,7 @@ impl ColorBuffer {
 impl Index<[u32; 2]> for ColorBuffer {
     type Output = Color;
 
+    #[inline]
     fn index(&self, index: [u32; 2]) -> &Self::Output {
         let index = self.calculate_index(index[0], index[1]);
         &self.color[index]
@@ -68,6 +69,7 @@ impl Index<[u32; 2]> for ColorBuffer {
 }
 
 impl IndexMut<[u32; 2]> for ColorBuffer {
+    #[inline]
     fn index_mut(&mut self, index: [u32; 2]) -> &mut Self::Output {
         let index = self.calculate_index(index[0], index[1]);
         &mut self.color[index]
@@ -131,6 +133,7 @@ impl ColorDepthBuffer {
 impl Index<[u32; 2]> for ColorDepthBuffer {
     type Output = Color;
 
+    #[inline]
     fn index(&self, index: [u32; 2]) -> &Self::Output {
         let index = self.calculate_index(index[0], index[1]);
         &self.color[index]
@@ -138,6 +141,7 @@ impl Index<[u32; 2]> for ColorDepthBuffer {
 }
 
 impl IndexMut<[u32; 2]> for ColorDepthBuffer {
+    #[inline]
     fn index_mut(&mut self, index: [u32; 2]) -> &mut Self::Output {
         let index = self.calculate_index(index[0], index[1]);
         &mut self.color[index]
@@ -157,11 +161,13 @@ impl RenderBuffer for ColorDepthBuffer {
         return bytemuck::cast_slice(self.color.as_slice());
     }
 
+    #[inline]
     fn depth(&self, x: u32, y: u32) -> f32 {
         let index = self.calculate_index(x, y);
         self.depth[index]
     }
 
+    #[inline]
     fn set_depth(&mut self, x: u32, y: u32, depth: f32) {
         let index = self.calculate_index(x, y);
         self.depth[index] = depth;
@@ -230,22 +236,22 @@ impl From<&Color> for [f32; 4] {
 ///
 /// Data transformation is split into these stages:
 /// - Vertex shading
-/// - Shape assembley
+/// - Shape assembly
 /// - Clipping
 /// - Perspective division
 /// - Rasterization
 /// - Fragment shading
 ///
 /// It is possible that number and order of stages will change as development progresses
-pub struct Pipeline<VI, VS, SA, C, R, DT, FS, const A: usize, const S: usize>
+pub struct Pipeline<VI, U, VS, SA, C, R, DT, FS, const A: usize, const S: usize>
 where
     VI: Copy,
-    VS: FnMut(VI) -> VertexOutput<A> + Copy,
+    VS: FnMut(VI, &U) -> VertexOutput<A> + Copy,
     SA: ShapeAssembler<u32, S>,
     C: FnMut([VertexOutput<A>; S]) -> Vec<[VertexOutput<A>; S]>,
     R: Rasterizer<A, S>,
     DT: FnMut(f32, f32) -> bool,
-    FS: FnMut(FragmentInput<A>) -> Color,
+    FS: FnMut(FragmentInput<A>, &U) -> Color,
 {
     vertex_shader: VS,
     shape_assembler: SA,
@@ -255,18 +261,19 @@ where
     fragment_shader: FS,
 
     vertex_input_pd: PhantomData<VI>,
+    uniform_pd: PhantomData<U>,
 }
 
-impl<VI, VS, SA, C, R, DT, FS, const A: usize, const S: usize>
-    Pipeline<VI, VS, SA, C, R, DT, FS, A, S>
+impl<VI, U, VS, SA, C, R, DT, FS, const A: usize, const S: usize>
+    Pipeline<VI, U, VS, SA, C, R, DT, FS, A, S>
 where
     VI: Copy,
-    VS: FnMut(VI) -> VertexOutput<A> + Copy,
+    VS: FnMut(VI, &U) -> VertexOutput<A> + Copy,
     SA: ShapeAssembler<u32, S>,
     C: FnMut([VertexOutput<A>; S]) -> Vec<[VertexOutput<A>; S]>,
     R: Rasterizer<A, S>,
     DT: FnMut(f32, f32) -> bool,
-    FS: FnMut(FragmentInput<A>) -> Color,
+    FS: FnMut(FragmentInput<A>, &U) -> Color,
 {
     pub fn new(
         vertex_shader: VS,
@@ -285,6 +292,7 @@ where
             fragment_shader,
 
             vertex_input_pd: PhantomData,
+            uniform_pd: PhantomData,
         }
     }
 
@@ -292,29 +300,42 @@ where
         &mut self,
         vertex_buffer: &[VI],
         index_buffer: &[u32],
+        uniforms: &U,
         framebuffer: &mut impl RenderBuffer,
     ) {
         let width = framebuffer.width();
         let height = framebuffer.height();
-        let mut vertex_shader = self.vertex_shader;
+
         let perspective_divide = |shape: [VertexOutput<A>; S]| {
             shape.map(|vertex| {
                 let inv_w = 1.0 / vertex.position.w;
+                let position = (vertex.position.xyz() * inv_w, inv_w).into();
                 FragmentInput {
-                    position: (vertex.position.xyz() * inv_w, inv_w).into(),
+                    position,
                     screen_position: glam::ivec2(
-                        ((vertex.position.x + 1.0) * width as f32 / 2.0).round() as i32,
-                        ((vertex.position.y + 1.0) * height as f32 / 2.0).round() as i32,
+                        ((position.x + 1.0) * width as f32 / 2.0).round() as i32,
+                        ((position.y + 1.0) * height as f32 / 2.0).round() as i32,
                     ),
                     attributes: vertex.attributes.map(|attribute| attribute * inv_w),
                 }
             })
         };
 
+        let mut rasterizer_action = |fragment_input: FragmentInput<A>| {
+            let position = fragment_input.screen_position.as_uvec2().to_array();
+            let depth_test_passed = (self.depth_test)(
+                framebuffer.depth(position[0], position[1]),
+                fragment_input.position.z,
+            );
+            if depth_test_passed {
+                framebuffer[position] = (self.fragment_shader)(fragment_input, &uniforms);
+            }
+        };
+
         self.rasterizer.set_screen_size(width, height);
         let shaded_vertices = vertex_buffer
             .into_iter()
-            .map(|&vertex| vertex_shader(vertex))
+            .map(|&vertex| (self.vertex_shader)(vertex, &uniforms))
             .collect::<Vec<_>>();
         index_buffer
             .into_iter()
@@ -324,23 +345,12 @@ where
             .map(|shape| (self.clipper)(shape).into_iter())
             .flatten()
             .map(perspective_divide)
-            .map(|shape| self.rasterizer.rasterize(shape).into_iter())
-            .flatten()
-            .for_each(|fragment_input| {
-                let position = fragment_input.screen_position.as_uvec2().to_array();
-                let depth_test_passed = (self.depth_test)(
-                    framebuffer.depth(position[0], position[1]),
-                    fragment_input.position.z,
-                );
-                if depth_test_passed {
-                    framebuffer[position] = (self.fragment_shader)(fragment_input);
-                }
-            });
+            .for_each(|shape| self.rasterizer.rasterize(shape, &mut rasterizer_action));
     }
 
-    pub fn draw(&mut self, vertex_buffer: &[VI], framebuffer: &mut impl RenderBuffer) {
+    pub fn draw(&mut self, vertex_buffer: &[VI], unforms: &U, framebuffer: &mut impl RenderBuffer) {
         let index_buffer = (0..vertex_buffer.len() as u32).collect::<Vec<_>>();
-        self.draw_indexed(vertex_buffer, &index_buffer, framebuffer);
+        self.draw_indexed(vertex_buffer, &index_buffer, unforms, framebuffer);
     }
 }
 
@@ -355,55 +365,6 @@ pub struct FragmentInput<const N: usize> {
     pub position: glam::Vec4,
     pub screen_position: glam::IVec2,
     pub attributes: [f32; N],
-}
-
-struct Interpolator<const N: usize> {
-    from_pos: glam::Vec4,
-    pos_delta: glam::Vec4,
-    from_attrib: [f32; N],
-    attrib_delta: [f32; N],
-}
-
-impl<const A: usize> Interpolator<A> {
-    fn new(from: &FragmentInput<A>, to: &FragmentInput<A>, steps: i32) -> Self {
-        let steps = steps as f32;
-
-        let attrib_delta = {
-            let mut attrib_delta = from.attributes;
-            for ((&from, &to), delta) in from
-                .attributes
-                .iter()
-                .zip(&to.attributes)
-                .zip(&mut attrib_delta)
-            {
-                *delta = to - from / steps;
-            }
-            attrib_delta
-        };
-
-        Self {
-            from_pos: from.position,
-            pos_delta: (to.position - from.position) / steps,
-            from_attrib: from.attributes,
-            attrib_delta,
-        }
-    }
-}
-
-impl<const A: usize> Iterator for Interpolator<A> {
-    type Item = (glam::Vec4, [f32; A]);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let w = 1.0 / self.from_pos.w;
-        let position = (self.from_pos.xyz() * w, self.from_pos.w).into();
-        let attributes = self.from_attrib.map(|attrib| attrib * w);
-        let res = Some((position, attributes));
-        self.from_pos += self.pos_delta;
-        for (attr, delta) in self.from_attrib.iter_mut().zip(&self.attrib_delta) {
-            *attr += delta;
-        }
-        res
-    }
 }
 
 pub trait ShapeAssembler<V: Copy, const S: usize>: Copy {
@@ -460,17 +421,17 @@ impl<V: Copy, const S: usize> ShapeAssembler<V, S> for StripShapeAssembler<V, S>
 }
 
 #[derive(Copy, Clone)]
-pub struct ListShapeAssembpler<V: Copy, const S: usize> {
+pub struct ListShapeAssembler<V: Copy, const S: usize> {
     shape: Option<[V; S]>,
 }
 
-impl<V: Copy, const S: usize> ListShapeAssembpler<V, S> {
+impl<V: Copy, const S: usize> ListShapeAssembler<V, S> {
     pub fn new() -> Self {
         Self { shape: None }
     }
 }
 
-impl<V: Copy, const S: usize> ShapeAssembler<V, S> for ListShapeAssembpler<V, S> {
+impl<V: Copy, const S: usize> ShapeAssembler<V, S> for ListShapeAssembler<V, S> {
     fn init(&mut self, iter: &mut impl Iterator<Item = V>) {
         let mut shape = Vec::with_capacity(S);
         for _ in 0..S {

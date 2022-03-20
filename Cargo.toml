@@ -5,6 +5,10 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[profile.release-debuginfo]
+inherits = "release"
+debug = 1
+
 [dependencies]
 glam = "0.19.0"
 wgpu = { version = "0.12.0", optional = true }
@@ -21,3 +25,4 @@ required-features = ["wgpu_presenter"]
 
 [dev-dependencies]
 winit = "0.26.1"
+gltf = { version = "1.0.0", features = ["names"] }
