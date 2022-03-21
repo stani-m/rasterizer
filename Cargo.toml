@@ -23,6 +23,10 @@ wgpu_presenter = ["wgpu", "futures", "raw-window-handle"]
 name = "lines"
 required-features = ["wgpu_presenter"]
 
+[[example]]
+name = "triangles"
+required-features = ["wgpu_presenter"]
+
 [dev-dependencies]
 winit = "0.26.1"
 gltf = { version = "1.0.0", features = ["names"] }

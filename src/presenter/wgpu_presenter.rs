@@ -40,9 +40,7 @@ impl WgpuPresenter<'_> {
             limits: wgpu::Limits::default(),
         };
         let (device, queue) = block_on(adapter.request_device(&descriptor, None)).unwrap();
-        let surface_format = surface
-            .get_preferred_format(&adapter)
-            .expect("Surface incompatible with adapter");
+        let surface_format = wgpu::TextureFormat::Bgra8Unorm;
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,

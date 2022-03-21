@@ -25,7 +25,7 @@ pub trait RenderBuffer: Index<[u32; 2], Output = Color> + IndexMut<[u32; 2]> {
     fn set_depth(&mut self, x: u32, y: u32, depth: f32) {}
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ColorBuffer {
     color: Vec<Color>,
     width: u32,
@@ -90,7 +90,7 @@ impl RenderBuffer for ColorBuffer {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ColorDepthBuffer {
     color: Vec<Color>,
     depth: Vec<f32>,
@@ -175,7 +175,7 @@ impl RenderBuffer for ColorDepthBuffer {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Color {
     pub r: f32,
     pub g: f32,
@@ -197,8 +197,8 @@ impl Color {
     }
 }
 
-impl From<&glam::Vec4> for Color {
-    fn from(vec: &glam::Vec4) -> Self {
+impl From<glam::Vec4> for Color {
+    fn from(vec: glam::Vec4) -> Self {
         Self {
             r: vec.x,
             g: vec.y,
@@ -208,14 +208,14 @@ impl From<&glam::Vec4> for Color {
     }
 }
 
-impl From<&Color> for glam::Vec4 {
-    fn from(color: &Color) -> Self {
+impl From<Color> for glam::Vec4 {
+    fn from(color: Color) -> Self {
         color.to_vec4()
     }
 }
 
-impl From<&[f32; 4]> for Color {
-    fn from(array: &[f32; 4]) -> Self {
+impl From<[f32; 4]> for Color {
+    fn from(array: [f32; 4]) -> Self {
         Self {
             r: array[0],
             g: array[1],
@@ -225,8 +225,8 @@ impl From<&[f32; 4]> for Color {
     }
 }
 
-impl From<&Color> for [f32; 4] {
-    fn from(color: &Color) -> Self {
+impl From<Color> for [f32; 4] {
+    fn from(color: Color) -> Self {
         color.to_array()
     }
 }
@@ -329,6 +329,7 @@ where
             );
             if depth_test_passed {
                 framebuffer[position] = (self.fragment_shader)(fragment_input, &uniforms);
+                framebuffer.set_depth(position[0], position[1], fragment_input.position.z);
             }
         };
 
@@ -354,13 +355,13 @@ where
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct VertexOutput<const N: usize> {
     pub position: glam::Vec4,
     pub attributes: [f32; N],
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct FragmentInput<const N: usize> {
     pub position: glam::Vec4,
     pub screen_position: glam::IVec2,

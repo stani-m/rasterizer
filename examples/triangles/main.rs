@@ -8,7 +8,7 @@ use winit::window::WindowBuilder;
 
 use model::Model;
 use rasterizer::presenter::WgpuPresenter;
-use rasterizer::rasterizer::BresenhamLineRasterizer;
+use rasterizer::rasterizer::BresenhamTriangleRasterizer;
 use rasterizer::{clipper, Color, ColorDepthBuffer, ListShapeAssembler, Pipeline, VertexOutput};
 
 #[path = "../model.rs"]
@@ -19,7 +19,7 @@ fn main() {
     let height = 600;
     let mut event_loop = EventLoop::new();
     let window = WindowBuilder::new()
-        .with_title("Lines example")
+        .with_title("Triangles example")
         .with_inner_size(PhysicalSize::new(width, height))
         .build(&event_loop)
         .unwrap();
@@ -27,26 +27,37 @@ fn main() {
     let mut framebuffer = ColorDepthBuffer::new(width, height);
     let mut presenter = WgpuPresenter::new(&window, width, height, true);
     let mut pipeline = Pipeline::new(
-        |vertex, &(transform, _)| {
-            let position: glam::Vec4 = (vertex, 1.0).into();
-            VertexOutput {
-                position: transform * position,
-                attributes: [],
-            }
+        |(position, uv): (glam::Vec3, glam::Vec2), &transform| VertexOutput {
+            position: transform * glam::Vec4::from((position, 1.0)),
+            attributes: uv.to_array(),
         },
         ListShapeAssembler::new(),
-        clipper::simple_line,
-        BresenhamLineRasterizer::new(),
+        clipper::passthrough,
+        BresenhamTriangleRasterizer::new(),
         |current, new| new <= current,
-        |_, &(_, color)| color,
+        |fragment_input, _| {
+            let pos = (glam::Vec2::from(fragment_input.attributes) * 20.0).as_ivec2() % 2;
+            if pos.x == pos.y {
+                Color::new(0.0, 1.0, 1.0, 1.0)
+            } else {
+                Color::new(1.0, 0.0, 1.0, 1.0)
+            }
+        },
     );
 
-    let (document, buffers, _) = gltf::import("examples/assets/TheDonut.gltf")
+    let (document, buffers, _) = gltf::import("examples/assets/Cube.gltf")
         .expect("glTF import failed, file probably not found, make sure to run examples from crate root directory");
-    let mut donut = Model::from(&document, &buffers[0]);
-    donut.transform_triangles_to_lines();
+    let mut cube = Model::from(&document, &buffers[0]);
+    let uvs: Vec<glam::Vec2> =
+        cube.load_vertex_attribute(gltf::Semantic::TexCoords(0), &buffers[0]);
+    let cube_vertex_uv_buffer = cube
+        .vertex_buffer()
+        .to_vec()
+        .into_iter()
+        .zip(uvs)
+        .collect::<Vec<_>>();
 
-    let zoom = glam::Mat4::from_scale(glam::vec3(20.0, 20.0, 20.0));
+    let zoom = glam::Mat4::from_scale(glam::vec3(0.5, 0.5, 0.5));
     let view = glam::Mat4::look_at_lh(
         glam::vec3(1.0, 2.0, 3.0),
         glam::vec3(0.0, 0.0, 0.0),
@@ -59,6 +70,13 @@ fn main() {
         100.0,
     );
     let mut camera = projection * view * zoom;
+
+    // #[rustfmt::skip]
+    // let vertex_buffer = [
+    //     glam::vec3( 0.5, -0.5, 0.5),
+    //     glam::vec3( 0.2,  0.0, 0.5),
+    //     glam::vec3(-0.5,  0.5, 0.5),
+    // ];
 
     let program_start = Instant::now();
     let mut last_frame_time = program_start;
@@ -98,30 +116,20 @@ fn main() {
 
             let rotate = glam::Quat::from_axis_angle(
                 glam::vec3(0.0, 1.0, 0.0),
-                -delta_time.as_secs_f32() * 0.1,
+                -delta_time.as_secs_f32() * 0.3,
             );
-            donut.rotation *= rotate;
+            cube.rotation *= rotate;
+            let transform = camera * cube.model_matrix();
 
             framebuffer.clear_color(Color::default());
             framebuffer.clear_depth(f32::INFINITY);
-            let transform = camera * donut.model_matrix();
             pipeline.draw_indexed(
-                donut.vertex_buffer(),
-                donut.index_buffer(),
-                &(transform, Color::new(0.0, 1.0, 1.0, 1.0)),
+                &cube_vertex_uv_buffer,
+                &cube.index_buffer(),
+                &transform,
                 &mut framebuffer,
             );
-            for child in donut.children() {
-                pipeline.draw_indexed(
-                    child.vertex_buffer(),
-                    child.index_buffer(),
-                    &(
-                        transform * child.model_matrix(),
-                        Color::new(1.0, 0.0, 1.0, 1.0),
-                    ),
-                    &mut framebuffer,
-                );
-            }
+            // pipeline.draw(&vertex_buffer, &glam::Mat4::IDENTITY, &mut framebuffer);
 
             presenter.present(&framebuffer);
 

@@ -29,24 +29,25 @@ fn triangles_to_lines_index(triangles: &[u32]) -> Vec<u32> {
         .collect()
 }
 
-pub struct Model {
+pub struct Model<'a> {
+    node: gltf::Node<'a>,
     name: String,
     vertex_buffer: Vec<glam::Vec3>,
     index_buffer: Vec<u32>,
-    children: Vec<Model>,
+    children: Vec<Model<'a>>,
     pub translation: glam::Vec3,
     pub rotation: glam::Quat,
     pub scale: glam::Vec3,
 }
 
-impl Model {
-    pub fn from(gltf: &gltf::Document, buffer: &[u8]) -> Self {
+impl<'a> Model<'a> {
+    pub fn from(gltf: &'a gltf::Document, buffer: &[u8]) -> Self {
         let scene = gltf.default_scene().unwrap();
         let node = scene.nodes().nth(0).unwrap();
-        Self::from_node(&node, buffer)
+        Self::from_node(node, buffer)
     }
 
-    pub fn from_node(node: &gltf::Node, buffer: &[u8]) -> Self {
+    pub fn from_node(node: gltf::Node<'a>, buffer: &[u8]) -> Self {
         let name = node.name().unwrap().to_string();
         if node.mesh().unwrap().primitives().len() != 1 {
             panic!("Multiple primitives not supported!");
@@ -95,10 +96,11 @@ impl Model {
         let scale = scale.into();
         let children = node
             .children()
-            .map(|child| Model::from_node(&child, buffer))
+            .map(|child| Model::from_node(child, buffer))
             .collect();
 
         Self {
+            node,
             name,
             vertex_buffer,
             index_buffer,
@@ -107,6 +109,35 @@ impl Model {
             rotation,
             scale,
         }
+    }
+
+    pub fn load_vertex_attribute<T: From<[f32; N]>, const N: usize>(
+        &self,
+        attribute_type: gltf::Semantic,
+        buffer: &[u8],
+    ) -> Vec<T> {
+        let attribute_view = self
+            .node
+            .mesh()
+            .unwrap()
+            .primitives()
+            .nth(0)
+            .unwrap()
+            .attributes()
+            .find_map(|attribute| (attribute.0 == attribute_type).then(|| attribute.1))
+            .expect("Attribute not found!")
+            .view()
+            .unwrap();
+        let start = attribute_view.offset();
+        let end = start + attribute_view.length();
+
+        bytemuck::cast_slice(&buffer[start..end])
+            .chunks_exact(N)
+            .map(|chunk| {
+                let array: [f32; N] = chunk.try_into().unwrap();
+                array.into()
+            })
+            .collect()
     }
 
     /// Calling this multiple times may lead to interesting visual effects
