@@ -171,24 +171,20 @@ impl<const A: usize> Rasterizer<A, 3> for BresenhamTriangleRasterizer {
         }
         if left.screen_position.x < top.screen_position.x {
             if right.screen_position.x < top.screen_position.x {
-                let left_run = (left.screen_position.x - top.screen_position.x) as f32;
-                let left_rise = (left.screen_position.y - top.screen_position.y) as f32;
+                let [left_run, left_rise] = (left.position.xy() - top.position.xy()).to_array();
                 let left_slope = left_run / left_rise;
-                let right_run = (right.screen_position.x - top.screen_position.x) as f32;
-                let right_rise = (right.screen_position.y - top.screen_position.y) as f32;
+                let [right_run, right_rise] = (right.position.xy() - top.position.xy()).to_array();
                 let right_slope = right_run / right_rise;
                 if left_slope < right_slope {
                     mem::swap(&mut left, &mut right);
                 }
             }
         }
-        if left.screen_position.x > top.screen_position.x {
+        if left.screen_position.x >= top.screen_position.x {
             if right.screen_position.x > top.screen_position.x {
-                let left_run = (left.screen_position.x - top.screen_position.x) as f32;
-                let left_rise = (left.screen_position.y - top.screen_position.y) as f32;
+                let [left_run, left_rise] = (left.position.xy() - top.position.xy()).to_array();
                 let left_slope = left_run / left_rise;
-                let right_run = (right.screen_position.x - top.screen_position.x) as f32;
-                let right_rise = (right.screen_position.y - top.screen_position.y) as f32;
+                let [right_run, right_rise] = (right.position.xy() - top.position.xy()).to_array();
                 let right_slope = right_run / right_rise;
                 if left_slope < right_slope {
                     mem::swap(&mut left, &mut right);

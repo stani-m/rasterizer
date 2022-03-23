@@ -36,7 +36,7 @@ fn main() {
         BresenhamTriangleRasterizer::new(),
         |current, new| new <= current,
         |fragment_input, _| {
-            let pos = (glam::Vec2::from(fragment_input.attributes) * 20.0).as_ivec2() % 2;
+            let pos = (glam::Vec2::from(fragment_input.attributes) * 24.0).as_ivec2() % 2;
             if pos.x == pos.y {
                 Color::new(0.0, 1.0, 1.0, 1.0)
             } else {
@@ -70,13 +70,6 @@ fn main() {
         100.0,
     );
     let mut camera = projection * view * zoom;
-
-    // #[rustfmt::skip]
-    // let vertex_buffer = [
-    //     glam::vec3( 0.5, -0.5, 0.5),
-    //     glam::vec3( 0.2,  0.0, 0.5),
-    //     glam::vec3(-0.5,  0.5, 0.5),
-    // ];
 
     let program_start = Instant::now();
     let mut last_frame_time = program_start;
@@ -129,7 +122,6 @@ fn main() {
                 &transform,
                 &mut framebuffer,
             );
-            // pipeline.draw(&vertex_buffer, &glam::Mat4::IDENTITY, &mut framebuffer);
 
             presenter.present(&framebuffer);
 
