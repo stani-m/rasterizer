@@ -8,8 +8,8 @@ use winit::window::WindowBuilder;
 
 use model::Model;
 use rasterizer::presenter::WgpuPresenter;
-use rasterizer::rasterizer::BresenhamTriangleRasterizer;
-use rasterizer::{clipper, Color, ColorDepthBuffer, ListShapeAssembler, Pipeline, VertexOutput};
+use rasterizer::rasterizer::{CullFace, EdgeFunctionRasterizer};
+use rasterizer::{clipper, Color, ColorDepthBuffer, ListShapeAssembler, Pipeline, FragmentInput};
 
 #[path = "../model.rs"]
 mod model;
@@ -27,13 +27,13 @@ fn main() {
     let mut framebuffer = ColorDepthBuffer::new(width, height);
     let mut presenter = WgpuPresenter::new(&window, width, height, true);
     let mut pipeline = Pipeline::new(
-        |(position, uv): (glam::Vec3, glam::Vec2), &transform| VertexOutput {
+        |(position, uv): (glam::Vec3, glam::Vec2), &transform| FragmentInput {
             position: transform * glam::Vec4::from((position, 1.0)),
             attributes: uv.to_array(),
         },
         ListShapeAssembler::new(),
-        clipper::passthrough,
-        BresenhamTriangleRasterizer::new(),
+        clipper::simple,
+        EdgeFunctionRasterizer::new(Some(CullFace::Ccw)),
         |current, new| new <= current,
         |fragment_input, _| {
             let pos = (glam::Vec2::from(fragment_input.attributes) * 24.0).as_ivec2() % 2;

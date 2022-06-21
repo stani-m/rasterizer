@@ -9,7 +9,7 @@ use winit::window::WindowBuilder;
 use model::Model;
 use rasterizer::presenter::WgpuPresenter;
 use rasterizer::rasterizer::BresenhamLineRasterizer;
-use rasterizer::{clipper, Color, ColorDepthBuffer, ListShapeAssembler, Pipeline, VertexOutput};
+use rasterizer::{clipper, Color, ColorDepthBuffer, FragmentInput, ListShapeAssembler, Pipeline};
 
 #[path = "../model.rs"]
 mod model;
@@ -29,13 +29,13 @@ fn main() {
     let mut pipeline = Pipeline::new(
         |vertex, &(transform, _)| {
             let position: glam::Vec4 = (vertex, 1.0).into();
-            VertexOutput {
+            FragmentInput {
                 position: transform * position,
                 attributes: [],
             }
         },
         ListShapeAssembler::new(),
-        clipper::simple_line,
+        clipper::simple,
         BresenhamLineRasterizer::new(),
         |current, new| new <= current,
         |_, &(_, color)| color,

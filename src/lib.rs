@@ -246,9 +246,9 @@ impl From<Color> for [f32; 4] {
 pub struct Pipeline<VI, U, VS, SA, C, R, DT, FS, const A: usize, const S: usize>
 where
     VI: Copy,
-    VS: FnMut(VI, &U) -> VertexOutput<A> + Copy,
+    VS: FnMut(VI, &U) -> FragmentInput<A> + Copy,
     SA: ShapeAssembler<u32, S>,
-    C: FnMut([VertexOutput<A>; S]) -> Vec<[VertexOutput<A>; S]>,
+    C: FnMut([FragmentInput<A>; S]) -> Vec<[FragmentInput<A>; S]>,
     R: Rasterizer<A, S>,
     DT: FnMut(f32, f32) -> bool,
     FS: FnMut(FragmentInput<A>, &U) -> Color,
@@ -268,9 +268,9 @@ impl<VI, U, VS, SA, C, R, DT, FS, const A: usize, const S: usize>
     Pipeline<VI, U, VS, SA, C, R, DT, FS, A, S>
 where
     VI: Copy,
-    VS: FnMut(VI, &U) -> VertexOutput<A> + Copy,
+    VS: FnMut(VI, &U) -> FragmentInput<A> + Copy,
     SA: ShapeAssembler<u32, S>,
-    C: FnMut([VertexOutput<A>; S]) -> Vec<[VertexOutput<A>; S]>,
+    C: FnMut([FragmentInput<A>; S]) -> Vec<[FragmentInput<A>; S]>,
     R: Rasterizer<A, S>,
     DT: FnMut(f32, f32) -> bool,
     FS: FnMut(FragmentInput<A>, &U) -> Color,
@@ -306,30 +306,25 @@ where
         let width = framebuffer.width();
         let height = framebuffer.height();
 
-        let perspective_divide = |shape: [VertexOutput<A>; S]| {
+        let perspective_divide = |shape: [FragmentInput<A>; S]| {
             shape.map(|vertex| {
                 let inv_w = 1.0 / vertex.position.w;
-                let position = (vertex.position.xyz() * inv_w, inv_w).into();
+                let position: glam::Vec4 = (vertex.position.xyz() * inv_w, inv_w).into();
+                let xy = (position.xy() + 1.0) * glam::vec2(width as f32, height as f32) / 2.0;
                 FragmentInput {
-                    position,
-                    screen_position: glam::ivec2(
-                        ((position.x + 1.0) * width as f32 / 2.0).round() as i32,
-                        ((position.y + 1.0) * height as f32 / 2.0).round() as i32,
-                    ),
+                    position: (xy, position.zw()).into(),
                     attributes: vertex.attributes.map(|attribute| attribute * inv_w),
                 }
             })
         };
 
         let mut rasterizer_action = |fragment_input: FragmentInput<A>| {
-            let position = fragment_input.screen_position.as_uvec2().to_array();
-            let depth_test_passed = (self.depth_test)(
-                framebuffer.depth(position[0], position[1]),
-                fragment_input.position.z,
-            );
+            let [x, y] = fragment_input.position.xy().round().as_uvec2().to_array();
+            let depth_test_passed =
+                (self.depth_test)(framebuffer.depth(x, y), fragment_input.position.z);
             if depth_test_passed {
-                framebuffer[position] = (self.fragment_shader)(fragment_input, &uniforms);
-                framebuffer.set_depth(position[0], position[1], fragment_input.position.z);
+                framebuffer[[x, y]] = (self.fragment_shader)(fragment_input, &uniforms);
+                framebuffer.set_depth(x, y, fragment_input.position.z);
             }
         };
 
@@ -356,15 +351,8 @@ where
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct VertexOutput<const N: usize> {
-    pub position: glam::Vec4,
-    pub attributes: [f32; N],
-}
-
-#[derive(Copy, Clone, Debug)]
 pub struct FragmentInput<const N: usize> {
     pub position: glam::Vec4,
-    pub screen_position: glam::IVec2,
     pub attributes: [f32; N],
 }
 

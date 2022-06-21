@@ -21,8 +21,8 @@ pub struct WgpuPresenter<'a> {
     texture_bind_group: wgpu::BindGroup,
 }
 
-impl WgpuPresenter<'_> {
-    pub fn new<W>(window: &W, width: u32, height: u32, vsync: bool) -> Self
+impl<'a> WgpuPresenter<'a> {
+    pub fn new<W>(window: &'a W, width: u32, height: u32, vsync: bool) -> Self
     where
         W: raw_window_handle::HasRawWindowHandle,
     {
@@ -247,7 +247,7 @@ fn fs_main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
                     framebuffer.width() * mem::size_of::<Color>() as u32,
                 ),
                 rows_per_image: NonZeroU32::new(
-                    framebuffer.height() * mem::size_of::<Color>() as u32,
+                    framebuffer.height(),
                 ),
             },
             wgpu::Extent3d {
@@ -274,7 +274,7 @@ fn fs_main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::default()),
-                        store: true,
+                        store: false,
                     },
                 }],
                 depth_stencil_attachment: None,
