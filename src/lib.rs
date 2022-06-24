@@ -319,7 +319,7 @@ where
         };
 
         let mut rasterizer_action = |fragment_input: FragmentInput<A>| {
-            let [x, y] = fragment_input.position.xy().round().as_uvec2().to_array();
+            let [x, y] = fragment_input.position.xy().as_uvec2().to_array();
             let depth_test_passed =
                 (self.depth_test)(framebuffer.depth(x, y), fragment_input.position.z);
             if depth_test_passed {

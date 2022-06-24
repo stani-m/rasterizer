@@ -396,12 +396,6 @@ impl EdgeFunctionRasterizer {
             cull_face,
         }
     }
-
-    fn edge_function(p: glam::Vec2, (v0, v1): (glam::Vec2, glam::Vec2)) -> f32 {
-        let a = p - v0;
-        let b = v1 - v0;
-        a.x * b.y - a.y * b.x
-    }
 }
 
 impl<const A: usize> Rasterizer<A, 3> for EdgeFunctionRasterizer {
@@ -415,12 +409,17 @@ impl<const A: usize> Rasterizer<A, 3> for EdgeFunctionRasterizer {
         let v1 = &shape[1];
         let v2 = &shape[2];
 
-        let area = Self::edge_function(v2.position.xy(), (v0.position.xy(), v1.position.xy()));
+        let area = {
+            let a = v0.position.xy() - v1.position.xy();
+            let b = v2.position.xy() - v1.position.xy();
+            a.x * b.y - a.y * b.x
+        };
         match (&self.cull_face, area > 0.0) {
             (Some(CullFace::Cw), true) => return,
             (Some(CullFace::Ccw), false) => return,
             _ => {}
         }
+        let inv_area = 1.0 / area;
 
         let mut min_bound = v0.position.xy();
         let mut max_bound = v0.position.xy();
@@ -438,21 +437,39 @@ impl<const A: usize> Rasterizer<A, 3> for EdgeFunctionRasterizer {
                 max_bound.y = vertex.y;
             }
         }
-        let min_bound = min_bound.floor().as_ivec2();
-        let max_bound = max_bound.ceil().as_ivec2();
+        let min_bound = min_bound.floor().as_ivec2().max(glam::ivec2(0, 0));
+        let max_bound = max_bound
+            .ceil()
+            .as_ivec2()
+            .min(glam::ivec2(self.width as i32, self.height as i32));
+
+        let w0_base = (v1.position.x * v2.position.y - v1.position.y * v2.position.x) * inv_area;
+        let w1_base = (v2.position.x * v0.position.y - v2.position.y * v0.position.x) * inv_area;
+        let w2_base = (v0.position.x * v1.position.y - v0.position.y * v1.position.x) * inv_area;
+
+        let w0_x_comp = (v1.position.y - v2.position.y) * inv_area;
+        let w1_x_comp = (v2.position.y - v0.position.y) * inv_area;
+        let w2_x_comp = (v0.position.y - v1.position.y) * inv_area;
+
+        let w0_y_comp = (v2.position.x - v1.position.x) * inv_area;
+        let w1_y_comp = (v0.position.x - v2.position.x) * inv_area;
+        let w2_y_comp = (v1.position.x - v0.position.x) * inv_area;
 
         for y in min_bound.y..max_bound.y {
+            let y = y as f32 + 0.5;
+            let w0_row = w0_y_comp * y + w0_base;
+            let w1_row = w1_y_comp * y + w1_base;
+            let w2_row = w2_y_comp * y + w2_base;
             for x in min_bound.x..max_bound.x {
-                let p = glam::ivec2(x, y).as_vec2() + 0.5;
-                let mut a0 = Self::edge_function(p, (v0.position.xy(), v1.position.xy()));
-                let mut a1 = Self::edge_function(p, (v1.position.xy(), v2.position.xy()));
-                let mut a2 = Self::edge_function(p, (v2.position.xy(), v0.position.xy()));
-                if a0.signum() == a1.signum() && a1.signum() == a2.signum() {
-                    a0 /= area;
-                    a1 /= area;
-                    a2 /= area;
+                let x = x as f32 + 0.5;
+                let w0 = w0_x_comp * x + w0_row;
+                let w1 = w1_x_comp * x + w1_row;
+                let w2 = w2_x_comp * x + w2_row;
+                if w0.signum() == w1.signum() && w1.signum() == w2.signum() {
+                    let p = (x, y).into();
                     let res_zw =
-                        v0.position.zw() * a1 + v1.position.zw() * a2 + v2.position.zw() * a0;
+                        v0.position.zw() * w0 + v1.position.zw() * w1 + v2.position.zw() * w2;
+                    // let res_pos: glam::Vec4 = (res_xy, res_zw).into();
                     let inv_w = 1.0 / res_zw[1];
                     let mut res_attribs = [0.0; A];
                     for ((&v0_attrib, &v1_attrib, &v2_attrib), res_attrib) in v0
@@ -463,7 +480,7 @@ impl<const A: usize> Rasterizer<A, 3> for EdgeFunctionRasterizer {
                         .map(|v012_attribs| (v012_attribs.0 .0, v012_attribs.0 .1, v012_attribs.1))
                         .zip(&mut res_attribs)
                     {
-                        *res_attrib = (v0_attrib * a1 + v1_attrib * a2 + v2_attrib * a0) * inv_w;
+                        *res_attrib = (v0_attrib * w0 + v1_attrib * w1 + v2_attrib * w2) * inv_w;
                     }
                     action(FragmentInput {
                         position: (p, res_zw).into(),

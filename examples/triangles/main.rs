@@ -9,7 +9,7 @@ use winit::window::WindowBuilder;
 use model::Model;
 use rasterizer::presenter::WgpuPresenter;
 use rasterizer::rasterizer::{CullFace, EdgeFunctionRasterizer};
-use rasterizer::{clipper, Color, ColorDepthBuffer, ListShapeAssembler, Pipeline, FragmentInput};
+use rasterizer::{clipper, Color, ColorDepthBuffer, FragmentInput, ListShapeAssembler, Pipeline};
 
 #[path = "../model.rs"]
 mod model;
