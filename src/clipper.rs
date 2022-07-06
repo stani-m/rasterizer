@@ -1,14 +1,14 @@
 use crate::FragmentInput;
 
-pub fn passthrough<const A: usize, const S: usize>(
-    shape: [FragmentInput<A>; S],
-) -> Vec<[FragmentInput<A>; S]> {
+pub fn passthrough<const A: usize, const V: usize>(
+    shape: [FragmentInput<A>; V],
+) -> Vec<[FragmentInput<A>; V]> {
     vec![shape]
 }
 
-pub fn simple<const A: usize, const S: usize>(
-    shape: [FragmentInput<A>; S],
-) -> Vec<[FragmentInput<A>; S]> {
+pub fn simple<const A: usize, const V: usize>(
+    shape: [FragmentInput<A>; V],
+) -> Vec<[FragmentInput<A>; V]> {
     #[rustfmt::skip]
     let out = {
         shape.iter().all(|vertex| vertex.position.x > vertex.position.w)

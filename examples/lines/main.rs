@@ -9,7 +9,10 @@ use winit::window::WindowBuilder;
 use model::Model;
 use rasterizer::presenter::WgpuPresenter;
 use rasterizer::rasterizer::BresenhamLineRasterizer;
-use rasterizer::{clipper, Color, ColorDepthBuffer, FragmentInput, ListShapeAssembler, Pipeline};
+use rasterizer::{
+    blend_function, clipper, depth_function, Buffer, Color, DepthState, FragmentInput,
+    ListShapeAssembler, Pipeline, PipelineDescriptor,
+};
 
 #[path = "../model.rs"]
 mod model;
@@ -24,22 +27,27 @@ fn main() {
         .build(&event_loop)
         .unwrap();
 
-    let mut framebuffer = ColorDepthBuffer::new(width, height);
+    let mut render_buffer = Buffer::<Color, 1>::new(width, height);
+    let mut depth_buffer = Buffer::<f32, 1>::new(width, height);
     let mut presenter = WgpuPresenter::new(&window, width, height, true);
-    let mut pipeline = Pipeline::new(
-        |vertex, &(transform, _)| {
+    let mut pipeline = Pipeline::new(PipelineDescriptor {
+        vertex_shader: |vertex, (transform, _)| {
             let position: glam::Vec4 = (vertex, 1.0).into();
             FragmentInput {
                 position: transform * position,
                 attributes: [],
             }
         },
-        ListShapeAssembler::new(),
-        clipper::simple,
-        BresenhamLineRasterizer::new(),
-        |current, new| new <= current,
-        |_, &(_, color)| color,
-    );
+        shape_assembler: ListShapeAssembler::new(),
+        clipper: clipper::simple,
+        rasterizer: BresenhamLineRasterizer::new(),
+        depth_state: DepthState {
+            depth_function: depth_function::less_or_equal,
+            write_depth: true,
+        },
+        fragment_shader: |_, (_, color)| color,
+        blend_function: blend_function::replace,
+    });
 
     let (document, buffers, _) = gltf::import("examples/assets/TheDonut.gltf")
         .expect("glTF import failed, file probably not found, make sure to run examples from crate root directory");
@@ -71,7 +79,8 @@ fn main() {
             WindowEvent::Resized(size) => {
                 let width = size.width;
                 let height = size.height;
-                framebuffer.resize(width, height);
+                render_buffer.resize(width, height);
+                depth_buffer.resize(width, height);
                 presenter.resize(width, height);
                 let projection = glam::Mat4::perspective_lh(
                     45_f32.to_radians(),
@@ -102,28 +111,30 @@ fn main() {
             );
             donut.rotation *= rotate;
 
-            framebuffer.clear_color(Color::default());
-            framebuffer.clear_depth(f32::INFINITY);
+            render_buffer.fill(Color::default());
+            depth_buffer.fill(1.0);
             let transform = camera * donut.model_matrix();
             pipeline.draw_indexed(
                 donut.vertex_buffer(),
                 donut.index_buffer(),
-                &(transform, Color::new(0.0, 1.0, 1.0, 1.0)),
-                &mut framebuffer,
+                (transform, Color::new(0.0, 1.0, 1.0, 1.0)),
+                &mut render_buffer,
+                &mut depth_buffer,
             );
             for child in donut.children() {
                 pipeline.draw_indexed(
                     child.vertex_buffer(),
                     child.index_buffer(),
-                    &(
+                    (
                         transform * child.model_matrix(),
                         Color::new(1.0, 0.0, 1.0, 1.0),
                     ),
-                    &mut framebuffer,
+                    &mut render_buffer,
+                    &mut depth_buffer,
                 );
             }
 
-            presenter.present(&framebuffer);
+            presenter.present(&render_buffer);
 
             last_frame_time = current_frame_time;
         }

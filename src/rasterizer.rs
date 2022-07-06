@@ -4,11 +4,12 @@ use glam::Vec4Swizzles;
 
 use crate::FragmentInput;
 
-pub trait Rasterizer<const A: usize, const S: usize> {
+pub trait Rasterizer<const A: usize, const V: usize> {
     fn set_screen_size(&mut self, width: u32, height: u32);
-    fn rasterize(&self, shape: [FragmentInput<A>; S], action: &mut impl FnMut(FragmentInput<A>));
+    fn rasterize(&self, shape: [FragmentInput<A>; V], action: &mut impl FnMut(FragmentInput<A>));
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct BresenhamLineRasterizer {
     width: i32,
     height: i32,
@@ -115,6 +116,7 @@ impl<const A: usize> Rasterizer<A, 2> for BresenhamLineRasterizer {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct BresenhamTriangleRasterizer {
     width: i32,
     height: i32,
@@ -377,11 +379,13 @@ impl<const A: usize> Iterator for Interpolator<A> {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CullFace {
     Cw,
     Ccw,
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct EdgeFunctionRasterizer {
     width: u32,
     height: u32,
@@ -414,12 +418,18 @@ impl<const A: usize> Rasterizer<A, 3> for EdgeFunctionRasterizer {
             let b = v2.position.xy() - v1.position.xy();
             a.x * b.y - a.y * b.x
         };
-        match (&self.cull_face, area > 0.0) {
-            (Some(CullFace::Cw), true) => return,
-            (Some(CullFace::Ccw), false) => return,
-            _ => {}
-        }
-        let inv_area = 1.0 / area;
+
+        let inv_area = if area > 0.0 {
+            if self.cull_face == Some(CullFace::Cw) {
+                return;
+            }
+            -1.0 / area
+        } else {
+            if self.cull_face == Some(CullFace::Ccw) {
+                return;
+            }
+            1.0 / area
+        };
 
         let mut min_bound = v0.position.xy();
         let mut max_bound = v0.position.xy();
@@ -465,27 +475,33 @@ impl<const A: usize> Rasterizer<A, 3> for EdgeFunctionRasterizer {
                 let w0 = w0_x_comp * x + w0_row;
                 let w1 = w1_x_comp * x + w1_row;
                 let w2 = w2_x_comp * x + w2_row;
-                if w0.signum() == w1.signum() && w1.signum() == w2.signum() {
-                    let p = (x, y).into();
+                if w0.to_bits() >> 31 == w1.to_bits() >> 31
+                    && w1.to_bits() >> 31 == w2.to_bits() >> 31
+                {
                     let res_zw =
                         v0.position.zw() * w0 + v1.position.zw() * w1 + v2.position.zw() * w2;
-                    // let res_pos: glam::Vec4 = (res_xy, res_zw).into();
-                    let inv_w = 1.0 / res_zw[1];
-                    let mut res_attribs = [0.0; A];
-                    for ((&v0_attrib, &v1_attrib, &v2_attrib), res_attrib) in v0
-                        .attributes
-                        .iter()
-                        .zip(&v1.attributes)
-                        .zip(&v2.attributes)
-                        .map(|v012_attribs| (v012_attribs.0 .0, v012_attribs.0 .1, v012_attribs.1))
-                        .zip(&mut res_attribs)
-                    {
-                        *res_attrib = (v0_attrib * w0 + v1_attrib * w1 + v2_attrib * w2) * inv_w;
+                    let pos = glam::vec4(x, y, res_zw[0], res_zw[1]);
+                    if 0.0 < pos.z && pos.z < 1.0 {
+                        let inv_w = 1.0 / res_zw[1];
+                        let mut res_attribs = [0.0; A];
+                        for ((&v0_attrib, &v1_attrib, &v2_attrib), res_attrib) in v0
+                            .attributes
+                            .iter()
+                            .zip(&v1.attributes)
+                            .zip(&v2.attributes)
+                            .map(|v012_attribs| {
+                                (v012_attribs.0 .0, v012_attribs.0 .1, v012_attribs.1)
+                            })
+                            .zip(&mut res_attribs)
+                        {
+                            *res_attrib =
+                                (v0_attrib * w0 + v1_attrib * w1 + v2_attrib * w2) * inv_w;
+                        }
+                        action(FragmentInput {
+                            position: pos,
+                            attributes: res_attribs,
+                        })
                     }
-                    action(FragmentInput {
-                        position: (p, res_zw).into(),
-                        attributes: res_attribs,
-                    })
                 }
             }
         }

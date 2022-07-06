@@ -2,10 +2,10 @@ use std::borrow::Cow;
 use std::mem;
 use std::num::NonZeroU32;
 
-use futures::executor::block_on;
+use pollster::FutureExt;
 use wgpu::util::DeviceExt;
 
-use crate::{Color, RenderBuffer};
+use crate::{Buffer, Color};
 
 pub struct WgpuPresenter<'a> {
     device: wgpu::Device,
@@ -26,20 +26,25 @@ impl<'a> WgpuPresenter<'a> {
     where
         W: raw_window_handle::HasRawWindowHandle,
     {
-        let instance = wgpu::Instance::new(wgpu::Backends::all());
+        let instance = wgpu::Instance::new(wgpu::Backends::PRIMARY);
         let surface = unsafe { instance.create_surface(&window) };
-        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: false,
-            compatible_surface: Some(&surface),
-        }))
-        .expect("Compatible adapter couldn't be found");
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                force_fallback_adapter: false,
+                compatible_surface: Some(&surface),
+            })
+            .block_on()
+            .expect("Compatible adapter couldn't be found");
         let descriptor = wgpu::DeviceDescriptor {
             label: None,
             features: wgpu::Features::default(),
             limits: wgpu::Limits::default(),
         };
-        let (device, queue) = block_on(adapter.request_device(&descriptor, None)).unwrap();
+        let (device, queue) = adapter
+            .request_device(&descriptor, None)
+            .block_on()
+            .unwrap();
         let surface_format = wgpu::TextureFormat::Bgra8Unorm;
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -53,7 +58,7 @@ impl<'a> WgpuPresenter<'a> {
             },
         };
         surface.configure(&device, &surface_config);
-        let shader_module = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(Self::SHADER)),
         });
@@ -150,7 +155,7 @@ impl<'a> WgpuPresenter<'a> {
             fragment: Some(wgpu::FragmentState {
                 module: &shader_module,
                 entry_point: "fs_main",
-                targets: &[surface_format.into()],
+                targets: &[Some(surface_format.into())],
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleStrip,
@@ -183,25 +188,25 @@ impl<'a> WgpuPresenter<'a> {
 
     const SHADER: &'static str = r#"
 struct VertexOutput {
-    [[builtin(position)]] clip_position: vec4<f32>;
-    [[location(0)]] texture_position: vec2<f32>;
-};
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) texture_position: vec2<f32>,
+}
 
-[[stage(vertex)]]
-fn vs_main([[location(0)]] vertex: vec2<f32>) -> VertexOutput {
+@vertex
+fn vs_main(@location(0) vertex: vec2<f32>) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = vec4<f32>(vertex, 0.5, 1.0);
     out.texture_position = vertex / 2.0 + 0.5;
     return out;
 }
 
-[[group(0), binding(0)]]
+@group(0) @binding(0)
 var texture: texture_2d<f32>;
-[[group(0), binding(1)]]
+@group(0) @binding(1)
 var texture_sampler: sampler;
 
-[[stage(fragment)]]
-fn fs_main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(texture, texture_sampler, in.texture_position);
 }
 "#;
@@ -232,7 +237,7 @@ fn fs_main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
         })
     }
 
-    pub fn present(&self, framebuffer: &impl RenderBuffer) {
+    pub fn present(&self, framebuffer: &Buffer<Color, 1>) {
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.texture,
@@ -240,15 +245,13 @@ fn fs_main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            framebuffer.color_slice(),
+            framebuffer.as_u8_slice(),
             wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: NonZeroU32::new(
                     framebuffer.width() * mem::size_of::<Color>() as u32,
                 ),
-                rows_per_image: NonZeroU32::new(
-                    framebuffer.height(),
-                ),
+                rows_per_image: NonZeroU32::new(framebuffer.height()),
             },
             wgpu::Extent3d {
                 width: framebuffer.width(),
@@ -269,14 +272,14 @@ fn fs_main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
-                color_attachments: &[wgpu::RenderPassColorAttachment {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::default()),
                         store: false,
                     },
-                }],
+                })],
                 depth_stencil_attachment: None,
             });
 

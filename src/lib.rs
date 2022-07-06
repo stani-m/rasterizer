@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::ops::{Index, IndexMut};
 
 use glam::Vec4Swizzles;
@@ -9,74 +8,23 @@ pub mod clipper;
 pub mod presenter;
 pub mod rasterizer;
 
-pub trait RenderBuffer: Index<[u32; 2], Output = Color> + IndexMut<[u32; 2]> {
-    fn width(&self) -> u32;
-
-    fn height(&self) -> u32;
-
-    fn color_slice(&self) -> &[u8];
-
-    #[allow(unused_variables)]
-    fn depth(&self, x: u32, y: u32) -> f32 {
-        f32::NEG_INFINITY
-    }
-
-    #[allow(unused_variables)]
-    fn set_depth(&mut self, x: u32, y: u32, depth: f32) {}
-}
-
 #[derive(Clone, Debug)]
-pub struct ColorBuffer {
-    color: Vec<Color>,
+pub struct Buffer<T: Copy + Default, const S: usize> {
+    data: Vec<[T; S]>,
     width: u32,
     height: u32,
 }
 
-impl ColorBuffer {
+impl<T: Copy + Default, const S: usize> Buffer<T, S> {
     pub fn new(width: u32, height: u32) -> Self {
         let size = width * height;
         Self {
-            color: vec![Color::default(); size as usize],
+            data: vec![[T::default(); S]; size as usize],
             width,
             height,
         }
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
-        self.width = width;
-        self.height = height;
-        self.color
-            .resize((width * height) as usize, Color::default());
-    }
-
-    pub fn clear(&mut self, color: Color) {
-        self.color.fill(color);
-    }
-
-    fn calculate_index(&self, x: u32, y: u32) -> usize {
-        (self.width * y + x) as usize
-    }
-}
-
-impl Index<[u32; 2]> for ColorBuffer {
-    type Output = Color;
-
-    #[inline]
-    fn index(&self, index: [u32; 2]) -> &Self::Output {
-        let index = self.calculate_index(index[0], index[1]);
-        &self.color[index]
-    }
-}
-
-impl IndexMut<[u32; 2]> for ColorBuffer {
-    #[inline]
-    fn index_mut(&mut self, index: [u32; 2]) -> &mut Self::Output {
-        let index = self.calculate_index(index[0], index[1]);
-        &mut self.color[index]
-    }
-}
-
-impl RenderBuffer for ColorBuffer {
     fn width(&self) -> u32 {
         self.width
     }
@@ -85,92 +33,79 @@ impl RenderBuffer for ColorBuffer {
         self.height
     }
 
-    fn color_slice(&self) -> &[u8] {
-        return bytemuck::cast_slice(self.color.as_slice());
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct ColorDepthBuffer {
-    color: Vec<Color>,
-    depth: Vec<f32>,
-    width: u32,
-    height: u32,
-}
-
-impl ColorDepthBuffer {
-    pub fn new(width: u32, height: u32) -> Self {
-        let size = (width * height) as usize;
-        Self {
-            color: vec![Color::default(); size],
-            depth: vec![f32::INFINITY; size],
-            width,
-            height,
-        }
-    }
-
     pub fn resize(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
-        let size = (width * height) as usize;
-        self.color.resize(size, Color::default());
-        self.depth.resize(size, f32::INFINITY);
+        self.data
+            .resize((width * height) as usize, [T::default(); S]);
     }
 
-    pub fn clear_color(&mut self, color: Color) {
-        self.color.fill(color);
-    }
-
-    pub fn clear_depth(&mut self, depth: f32) {
-        self.depth.fill(depth);
+    pub fn fill(&mut self, value: T) {
+        self.data.fill([value; S]);
     }
 
     fn calculate_index(&self, x: u32, y: u32) -> usize {
         (self.width * y + x) as usize
     }
+
+    pub fn as_slice(&self) -> &[[T; S]] {
+        self.data.as_slice()
+    }
 }
 
-impl Index<[u32; 2]> for ColorDepthBuffer {
-    type Output = Color;
+impl<T: Copy + Default + bytemuck::Pod + bytemuck::Zeroable, const S: usize> Buffer<T, S> {
+    pub fn as_u8_slice(&self) -> &[u8] {
+        bytemuck::cast_slice(self.data.as_slice())
+    }
+}
+
+impl<T: Copy + Default, const S: usize> Index<[u32; 2]> for Buffer<T, S> {
+    type Output = [T; S];
 
     #[inline]
     fn index(&self, index: [u32; 2]) -> &Self::Output {
-        let index = self.calculate_index(index[0], index[1]);
-        &self.color[index]
+        let i = self.calculate_index(index[0], index[1]);
+        &self.data[i]
     }
 }
 
-impl IndexMut<[u32; 2]> for ColorDepthBuffer {
+impl<T: Copy + Default, const S: usize> IndexMut<[u32; 2]> for Buffer<T, S> {
     #[inline]
     fn index_mut(&mut self, index: [u32; 2]) -> &mut Self::Output {
-        let index = self.calculate_index(index[0], index[1]);
-        &mut self.color[index]
+        let i = self.calculate_index(index[0], index[1]);
+        &mut self.data[i]
     }
 }
 
-impl RenderBuffer for ColorDepthBuffer {
-    fn width(&self) -> u32 {
-        self.width
-    }
-
-    fn height(&self) -> u32 {
-        self.height
-    }
-
-    fn color_slice(&self) -> &[u8] {
-        return bytemuck::cast_slice(self.color.as_slice());
-    }
+impl<T: Copy + Default> Index<(u32, u32)> for Buffer<T, 1> {
+    type Output = T;
 
     #[inline]
-    fn depth(&self, x: u32, y: u32) -> f32 {
-        let index = self.calculate_index(x, y);
-        self.depth[index]
+    fn index(&self, index: (u32, u32)) -> &Self::Output {
+        &self[[index.0, index.1]][0]
     }
+}
+
+impl<T: Copy + Default> IndexMut<(u32, u32)> for Buffer<T, 1> {
+    #[inline]
+    fn index_mut(&mut self, index: (u32, u32)) -> &mut Self::Output {
+        &mut self[[index.0, index.1]][0]
+    }
+}
+
+impl<T: Copy + Default, const S: usize> Index<[u32; 3]> for Buffer<T, S> {
+    type Output = T;
 
     #[inline]
-    fn set_depth(&mut self, x: u32, y: u32, depth: f32) {
-        let index = self.calculate_index(x, y);
-        self.depth[index] = depth;
+    fn index(&self, index: [u32; 3]) -> &Self::Output {
+        &self[[index[0], index[1]]][index[2] as usize]
+    }
+}
+
+impl<T: Copy + Default, const S: usize> IndexMut<[u32; 3]> for Buffer<T, S> {
+    #[inline]
+    fn index_mut(&mut self, index: [u32; 3]) -> &mut Self::Output {
+        &mut self[[index[0], index[1]]][index[2] as usize]
     }
 }
 
@@ -231,82 +166,138 @@ impl From<Color> for [f32; 4] {
     }
 }
 
-/// Pipeline defines how data is transformed to turn geometry into a rendered image ready for
-/// presentation or further rendering
-///
-/// Data transformation is split into these stages:
-/// - Vertex shading
-/// - Shape assembly
-/// - Clipping
-/// - Perspective division
-/// - Rasterization
-/// - Fragment shading
-///
-/// It is possible that number and order of stages will change as development progresses
-pub struct Pipeline<VI, U, VS, SA, C, R, DT, FS, const A: usize, const S: usize>
-where
-    VI: Copy,
-    VS: FnMut(VI, &U) -> FragmentInput<A> + Copy,
-    SA: ShapeAssembler<u32, S>,
-    C: FnMut([FragmentInput<A>; S]) -> Vec<[FragmentInput<A>; S]>,
-    R: Rasterizer<A, S>,
-    DT: FnMut(f32, f32) -> bool,
-    FS: FnMut(FragmentInput<A>, &U) -> Color,
-{
+#[derive(Copy, Clone, Debug)]
+pub struct DepthState<DF> {
+    pub depth_function: DF,
+    pub write_depth: bool,
+}
+
+pub mod depth_function {
+    #[inline]
+    pub fn less_or_equal(src: f32, dst: f32) -> bool {
+        dst >= src
+    }
+
+    #[inline]
+    pub fn less(src: f32, dst: f32) -> bool {
+        dst > src
+    }
+
+    #[inline]
+    pub fn greater_or_equal(src: f32, dst: f32) -> bool {
+        dst <= src
+    }
+
+    #[inline]
+    pub fn greater(src: f32, dst: f32) -> bool {
+        dst < src
+    }
+    #[inline]
+
+    pub fn always_pass(_: f32, _: f32) -> bool {
+        true
+    }
+
+    #[inline]
+    pub fn always_fail(_: f32, _: f32) -> bool {
+        false
+    }
+}
+
+pub mod blend_function {
+    use crate::Color;
+
+    #[inline]
+    pub fn replace(src: &Color, _: &Color) -> Color {
+        *src
+    }
+
+    #[inline]
+    pub fn alpha_blend(src: &Color, dst: &Color) -> Color {
+        let comp_a = src.a + (1.0 - src.a) * dst.a;
+        Color {
+            r: (src.r * src.a + (1.0 - src.a) * dst.r * dst.a) / comp_a,
+            g: (src.g * src.a + (1.0 - src.a) * dst.g * dst.a) / comp_a,
+            b: (src.b * src.a + (1.0 - src.a) * dst.b * dst.a) / comp_a,
+            a: comp_a,
+        }
+    }
+
+    #[inline]
+    pub fn precomputed_alpha_blend(src: &Color, dst: &Color) -> Color {
+        Color {
+            r: src.r + (1.0 - src.a) * dst.r,
+            g: src.g + (1.0 - src.a) * dst.g,
+            b: src.b + (1.0 - src.a) * dst.b,
+            a: src.a + (1.0 - src.a) * dst.a,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct PipelineDescriptor<VS, SA, C, R, DF, FS, B> {
+    pub vertex_shader: VS,
+    pub shape_assembler: SA,
+    pub clipper: C,
+    pub rasterizer: R,
+    pub depth_state: Option<DepthState<DF>>,
+    pub fragment_shader: FS,
+    pub blend_function: B,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct Pipeline<VS, SA, C, R, DF, FS, B, const A: usize, const V: usize> {
     vertex_shader: VS,
     shape_assembler: SA,
     clipper: C,
     rasterizer: R,
-    depth_test: DT,
+    depth_state: Option<DepthState<DF>>,
     fragment_shader: FS,
-
-    vertex_input_pd: PhantomData<VI>,
-    uniform_pd: PhantomData<U>,
+    blend_function: B,
 }
 
-impl<VI, U, VS, SA, C, R, DT, FS, const A: usize, const S: usize>
-    Pipeline<VI, U, VS, SA, C, R, DT, FS, A, S>
+impl<VS, SA, C, R, DF, FS, B, const A: usize, const V: usize>
+    Pipeline<VS, SA, C, R, DF, FS, B, A, V>
 where
-    VI: Copy,
-    VS: FnMut(VI, &U) -> FragmentInput<A> + Copy,
-    SA: ShapeAssembler<u32, S>,
-    C: FnMut([FragmentInput<A>; S]) -> Vec<[FragmentInput<A>; S]>,
-    R: Rasterizer<A, S>,
-    DT: FnMut(f32, f32) -> bool,
-    FS: FnMut(FragmentInput<A>, &U) -> Color,
+    SA: ShapeAssembler<u32, V>,
+    C: FnMut([FragmentInput<A>; V]) -> Vec<[FragmentInput<A>; V]>,
+    R: Rasterizer<A, V>,
+    DF: Fn(f32, f32) -> bool,
 {
-    pub fn new(
-        vertex_shader: VS,
-        shape_assembler: SA,
-        clipper: C,
-        rasterizer: R,
-        depth_test: DT,
-        fragment_shader: FS,
-    ) -> Self {
+    pub fn new(descriptor: PipelineDescriptor<VS, SA, C, R, DF, FS, B>) -> Self {
         Self {
-            vertex_shader,
-            shape_assembler,
-            clipper,
-            rasterizer,
-            depth_test,
-            fragment_shader,
-
-            vertex_input_pd: PhantomData,
-            uniform_pd: PhantomData,
+            vertex_shader: descriptor.vertex_shader,
+            shape_assembler: descriptor.shape_assembler,
+            clipper: descriptor.clipper,
+            rasterizer: descriptor.rasterizer,
+            depth_state: descriptor.depth_state,
+            fragment_shader: descriptor.fragment_shader,
+            blend_function: descriptor.blend_function,
         }
     }
 
-    pub fn draw_indexed(
+    pub fn draw_indexed<VI, U, T>(
         &mut self,
         vertex_buffer: &[VI],
         index_buffer: &[u32],
-        uniforms: &U,
-        framebuffer: &mut impl RenderBuffer,
-    ) {
-        let width = framebuffer.width();
-        let height = framebuffer.height();
+        uniforms: U,
+        render_buffer: &mut Buffer<T, 1>,
+        mut depth_buffer: Option<&mut Buffer<f32, 1>>,
+    ) where
+        VI: Copy,
+        U: Copy,
+        T: Copy + Default,
+        VS: Fn(VI, U) -> FragmentInput<A>,
+        FS: Fn(FragmentInput<A>, U) -> T,
+        B: Fn(&T, &T) -> T,
+    {
+        if self.depth_state.is_some() && depth_buffer.is_none() {
+            panic!("Attempting to draw using pipeline that requires depth buffer without a depth buffer");
+        }
+        let width = render_buffer.width();
+        let height = render_buffer.height();
 
-        let perspective_divide = |shape: [FragmentInput<A>; S]| {
+        let perspective_divide = |shape: [FragmentInput<A>; V]| {
             shape.map(|vertex| {
                 let inv_w = 1.0 / vertex.position.w;
                 let position: glam::Vec4 = (vertex.position.xyz() * inv_w, inv_w).into();
@@ -320,18 +311,33 @@ where
 
         let mut rasterizer_action = |fragment_input: FragmentInput<A>| {
             let [x, y] = fragment_input.position.xy().as_uvec2().to_array();
-            let depth_test_passed =
-                (self.depth_test)(framebuffer.depth(x, y), fragment_input.position.z);
-            if depth_test_passed {
-                framebuffer[[x, y]] = (self.fragment_shader)(fragment_input, &uniforms);
-                framebuffer.set_depth(x, y, fragment_input.position.z);
+
+            if let Some(depth_state) = &self.depth_state {
+                let depth_buffer = depth_buffer.as_mut().unwrap();
+                let src_depth = fragment_input.position.z;
+                let dst_depth = depth_buffer[[x, y, 0]];
+                let depth_test_passed = (depth_state.depth_function)(src_depth, dst_depth);
+
+                if depth_test_passed {
+                    let src_color = (self.fragment_shader)(fragment_input, uniforms);
+                    let dst_color = render_buffer[[x, y, 0]];
+                    render_buffer[[x, y, 0]] = (self.blend_function)(&src_color, &dst_color);
+
+                    if depth_state.write_depth {
+                        depth_buffer[[x, y, 0]] = src_depth;
+                    }
+                }
+            } else {
+                let src_color = (self.fragment_shader)(fragment_input, uniforms);
+                let dst_color = render_buffer[[x, y, 0]];
+                render_buffer[[x, y, 0]] = (self.blend_function)(&src_color, &dst_color);
             }
         };
 
         self.rasterizer.set_screen_size(width, height);
         let shaded_vertices = vertex_buffer
             .into_iter()
-            .map(|&vertex| (self.vertex_shader)(vertex, &uniforms))
+            .map(|&vertex| (self.vertex_shader)(vertex, uniforms))
             .collect::<Vec<_>>();
         index_buffer
             .into_iter()
@@ -344,41 +350,60 @@ where
             .for_each(|shape| self.rasterizer.rasterize(shape, &mut rasterizer_action));
     }
 
-    pub fn draw(&mut self, vertex_buffer: &[VI], unforms: &U, framebuffer: &mut impl RenderBuffer) {
+    pub fn draw<VI, U, T>(
+        &mut self,
+        vertex_buffer: &[VI],
+        unforms: U,
+        render_buffer: &mut Buffer<T, 1>,
+        depth_buffer: Option<&mut Buffer<f32, 1>>,
+    ) where
+        VI: Copy,
+        U: Copy,
+        T: Copy + Default,
+        VS: Fn(VI, U) -> FragmentInput<A>,
+        FS: Fn(FragmentInput<A>, U) -> T,
+        B: Fn(&T, &T) -> T,
+    {
         let index_buffer = (0..vertex_buffer.len() as u32).collect::<Vec<_>>();
-        self.draw_indexed(vertex_buffer, &index_buffer, unforms, framebuffer);
+        self.draw_indexed(
+            vertex_buffer,
+            &index_buffer,
+            unforms,
+            render_buffer,
+            depth_buffer,
+        );
     }
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct FragmentInput<const N: usize> {
+pub struct FragmentInput<const A: usize> {
     pub position: glam::Vec4,
-    pub attributes: [f32; N],
+    pub attributes: [f32; A],
 }
 
-pub trait ShapeAssembler<V: Copy, const S: usize>: Copy {
+pub trait ShapeAssembler<V: Copy, const N: usize>: Copy {
     fn init(&mut self, iter: &mut impl Iterator<Item = V>);
-    fn next(&mut self, iter: &mut impl Iterator<Item = V>) -> Option<[V; S]>;
+    fn next(&mut self, iter: &mut impl Iterator<Item = V>) -> Option<[V; N]>;
     fn size_hint(&self, _: &impl Iterator<Item = V>) -> (usize, Option<usize>) {
         (0, None)
     }
 }
 
-#[derive(Copy, Clone)]
-pub struct StripShapeAssembler<V: Copy, const S: usize> {
-    shape: Option<[V; S]>,
+#[derive(Copy, Clone, Debug)]
+pub struct StripShapeAssembler<V: Copy, const N: usize> {
+    shape: Option<[V; N]>,
 }
 
-impl<V: Copy, const S: usize> StripShapeAssembler<V, S> {
+impl<V: Copy, const N: usize> StripShapeAssembler<V, N> {
     pub fn new() -> Self {
         Self { shape: None }
     }
 }
 
-impl<V: Copy, const S: usize> ShapeAssembler<V, S> for StripShapeAssembler<V, S> {
+impl<V: Copy, const N: usize> ShapeAssembler<V, N> for StripShapeAssembler<V, N> {
     fn init(&mut self, iter: &mut impl Iterator<Item = V>) {
-        let mut shape = Vec::with_capacity(S);
-        for _ in 0..S {
+        let mut shape = Vec::with_capacity(N);
+        for _ in 0..N {
             if let Some(vertex) = iter.next() {
                 shape.push(vertex);
             }
@@ -386,14 +411,14 @@ impl<V: Copy, const S: usize> ShapeAssembler<V, S> for StripShapeAssembler<V, S>
         self.shape = shape.try_into().ok();
     }
 
-    fn next(&mut self, iter: &mut impl Iterator<Item = V>) -> Option<[V; S]> {
+    fn next(&mut self, iter: &mut impl Iterator<Item = V>) -> Option<[V; N]> {
         if let Some(ref mut shape) = self.shape {
             let res = *shape;
             if let Some(vertex) = iter.next() {
-                for i in 1..S {
+                for i in 1..N {
                     shape[i - 1] = shape[i];
                 }
-                shape[S - 1] = vertex;
+                shape[N - 1] = vertex;
             } else {
                 self.shape = None;
             }
@@ -409,21 +434,21 @@ impl<V: Copy, const S: usize> ShapeAssembler<V, S> for StripShapeAssembler<V, S>
     }
 }
 
-#[derive(Copy, Clone)]
-pub struct ListShapeAssembler<V: Copy, const S: usize> {
-    shape: Option<[V; S]>,
+#[derive(Copy, Clone, Debug)]
+pub struct ListShapeAssembler<V: Copy, const N: usize> {
+    shape: Option<[V; N]>,
 }
 
-impl<V: Copy, const S: usize> ListShapeAssembler<V, S> {
+impl<V: Copy, const N: usize> ListShapeAssembler<V, N> {
     pub fn new() -> Self {
         Self { shape: None }
     }
 }
 
-impl<V: Copy, const S: usize> ShapeAssembler<V, S> for ListShapeAssembler<V, S> {
+impl<V: Copy, const N: usize> ShapeAssembler<V, N> for ListShapeAssembler<V, N> {
     fn init(&mut self, iter: &mut impl Iterator<Item = V>) {
-        let mut shape = Vec::with_capacity(S);
-        for _ in 0..S {
+        let mut shape = Vec::with_capacity(N);
+        for _ in 0..N {
             if let Some(vertex) = iter.next() {
                 shape.push(vertex);
             }
@@ -431,7 +456,7 @@ impl<V: Copy, const S: usize> ShapeAssembler<V, S> for ListShapeAssembler<V, S> 
         self.shape = shape.try_into().ok();
     }
 
-    fn next(&mut self, iter: &mut impl Iterator<Item = V>) -> Option<[V; S]> {
+    fn next(&mut self, iter: &mut impl Iterator<Item = V>) -> Option<[V; N]> {
         if let Some(ref mut shape) = self.shape {
             let res = *shape;
             for vertex in shape {
@@ -454,20 +479,21 @@ impl<V: Copy, const S: usize> ShapeAssembler<V, S> for ListShapeAssembler<V, S> 
     }
 }
 
-struct ShapeAssemblerIterator<I, SA, V, const S: usize>
+#[derive(Debug)]
+struct ShapeAssemblerIterator<I, SA, V, const N: usize>
 where
     I: Iterator<Item = V>,
-    SA: ShapeAssembler<V, S>,
+    SA: ShapeAssembler<V, N>,
     V: Copy,
 {
     iter: I,
     shape_assembler: SA,
 }
 
-impl<I, SA, V, const S: usize> ShapeAssemblerIterator<I, SA, V, S>
+impl<I, SA, V, const N: usize> ShapeAssemblerIterator<I, SA, V, N>
 where
     I: Iterator<Item = V>,
-    SA: ShapeAssembler<V, S>,
+    SA: ShapeAssembler<V, N>,
     V: Copy,
 {
     fn new(mut iter: I, mut shape_assembler: SA) -> Self {
@@ -479,13 +505,13 @@ where
     }
 }
 
-impl<I, SA, V, const S: usize> Iterator for ShapeAssemblerIterator<I, SA, V, S>
+impl<I, SA, V, const N: usize> Iterator for ShapeAssemblerIterator<I, SA, V, N>
 where
     I: Iterator<Item = V>,
-    SA: ShapeAssembler<V, S>,
+    SA: ShapeAssembler<V, N>,
     V: Copy,
 {
-    type Item = [V; S];
+    type Item = [V; N];
 
     fn next(&mut self) -> Option<Self::Item> {
         self.shape_assembler.next(&mut self.iter)
@@ -496,20 +522,20 @@ where
     }
 }
 
-trait ShapeAssemblerIteratorTrait<SA, V, const S: usize>: Iterator<Item = V> + Sized
+trait ShapeAssemblerIteratorTrait<SA, V, const N: usize>: Iterator<Item = V> + Sized
 where
-    SA: ShapeAssembler<V, S>,
+    SA: ShapeAssembler<V, N>,
     V: Copy,
 {
-    fn assemble_shapes(self, shape_assembler: SA) -> ShapeAssemblerIterator<Self, SA, V, S> {
+    fn assemble_shapes(self, shape_assembler: SA) -> ShapeAssemblerIterator<Self, SA, V, N> {
         ShapeAssemblerIterator::new(self, shape_assembler)
     }
 }
 
-impl<I, SA, const S: usize> ShapeAssemblerIteratorTrait<SA, I::Item, S> for I
+impl<I, SA, const N: usize> ShapeAssemblerIteratorTrait<SA, I::Item, N> for I
 where
     I: Iterator,
     I::Item: Copy,
-    SA: ShapeAssembler<I::Item, S>,
+    SA: ShapeAssembler<I::Item, N>,
 {
 }
