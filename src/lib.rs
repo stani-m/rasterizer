@@ -1,15 +1,18 @@
-use std::ops::{Index, IndexMut};
+use std::iter::Sum;
+use std::ops::{Add, Div, Index, IndexMut};
 
 use glam::Vec4Swizzles;
 
 use rasterizer::Rasterizer;
+
+use crate::rasterizer::{DepthTools, FragmentTools};
 
 pub mod clipper;
 pub mod presenter;
 pub mod rasterizer;
 
 #[derive(Clone, Debug)]
-pub struct Buffer<T: Copy + Default, const S: usize> {
+pub struct Buffer<T: Copy + Default, const S: usize = 1> {
     data: Vec<[T; S]>,
     width: u32,
     height: u32,
@@ -17,6 +20,7 @@ pub struct Buffer<T: Copy + Default, const S: usize> {
 
 impl<T: Copy + Default, const S: usize> Buffer<T, S> {
     pub fn new(width: u32, height: u32) -> Self {
+        assert!(S > 0, "buffer cannot have 0 samples");
         let size = width * height;
         Self {
             data: vec![[T::default(); S]; size as usize],
@@ -51,10 +55,25 @@ impl<T: Copy + Default, const S: usize> Buffer<T, S> {
     pub fn as_slice(&self) -> &[[T; S]] {
         self.data.as_slice()
     }
-}
 
-impl<T: Copy + Default + bytemuck::Pod + bytemuck::Zeroable, const S: usize> Buffer<T, S> {
-    pub fn as_u8_slice(&self) -> &[u8] {
+    pub fn resolve<const N: usize>(&self, dst: &mut Buffer<T, N>)
+    where
+        T: Sum + Div<f32, Output = T>,
+    {
+        assert!(
+            self.width == dst.width && self.height == dst.height,
+            "resolving buffers with different dimmensions not supported"
+        );
+        for (&src, dst) in self.data.iter().zip(&mut dst.data) {
+            let average = src.into_iter().sum::<T>() / S as f32;
+            dst.fill(average);
+        }
+    }
+
+    pub fn as_u8_slice(&self) -> &[u8]
+    where
+        T: bytemuck::Pod + bytemuck::Zeroable,
+    {
         bytemuck::cast_slice(self.data.as_slice())
     }
 }
@@ -129,6 +148,38 @@ impl Color {
 
     pub fn to_array(&self) -> [f32; 4] {
         [self.r, self.g, self.b, self.a]
+    }
+}
+
+impl Add for Color {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            r: self.r + rhs.r,
+            g: self.g + rhs.g,
+            b: self.b + rhs.b,
+            a: self.a + rhs.a,
+        }
+    }
+}
+
+impl Div<f32> for Color {
+    type Output = Self;
+
+    fn div(self, rhs: f32) -> Self::Output {
+        Self {
+            r: self.r / rhs,
+            g: self.g / rhs,
+            b: self.b / rhs,
+            a: self.a / rhs,
+        }
+    }
+}
+
+impl Sum for Color {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), |color1, color2| color1 + color2)
     }
 }
 
@@ -235,7 +286,38 @@ pub mod blend_function {
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct PipelineDescriptor<VS, SA, C, R, DF, FS, B> {
+pub enum PixelCenterOffset {
+    Index(usize),
+    Offset(glam::Vec2),
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct MultisampleState<const S: usize> {
+    pub sample_offsets: [glam::Vec2; S],
+    pub center_offset: PixelCenterOffset,
+}
+
+impl MultisampleState<1> {
+    pub const SINGLE_SAMPLE: Self = Self {
+        sample_offsets: [glam::vec2(0.5, 0.5)],
+        center_offset: PixelCenterOffset::Index(0),
+    };
+}
+
+impl MultisampleState<4> {
+    pub const X4: Self = Self {
+        sample_offsets: [
+            glam::vec2(0.375, 0.125),
+            glam::vec2(0.625, 0.875),
+            glam::vec2(0.125, 0.625),
+            glam::vec2(0.875, 0.375),
+        ],
+        center_offset: PixelCenterOffset::Offset(glam::vec2(0.5, 0.5)),
+    };
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct PipelineDescriptor<VS, SA, C, R, DF, FS, B, const S: usize> {
     pub vertex_shader: VS,
     pub shape_assembler: SA,
     pub clipper: C,
@@ -243,10 +325,11 @@ pub struct PipelineDescriptor<VS, SA, C, R, DF, FS, B> {
     pub depth_state: Option<DepthState<DF>>,
     pub fragment_shader: FS,
     pub blend_function: B,
+    pub multisample_state: MultisampleState<S>,
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct Pipeline<VS, SA, C, R, DF, FS, B, const A: usize, const V: usize> {
+pub struct Pipeline<VS, SA, C, R, DF, FS, B, const A: usize, const V: usize, const S: usize> {
     vertex_shader: VS,
     shape_assembler: SA,
     clipper: C,
@@ -254,17 +337,18 @@ pub struct Pipeline<VS, SA, C, R, DF, FS, B, const A: usize, const V: usize> {
     depth_state: Option<DepthState<DF>>,
     fragment_shader: FS,
     blend_function: B,
+    multisample_state: MultisampleState<S>,
 }
 
-impl<VS, SA, C, R, DF, FS, B, const A: usize, const V: usize>
-    Pipeline<VS, SA, C, R, DF, FS, B, A, V>
+impl<VS, SA, C, R, DF, FS, B, const A: usize, const V: usize, const S: usize>
+    Pipeline<VS, SA, C, R, DF, FS, B, A, V, S>
 where
     SA: ShapeAssembler<u32, V>,
     C: FnMut([FragmentInput<A>; V]) -> Vec<[FragmentInput<A>; V]>,
-    R: Rasterizer<A, V>,
+    R: Rasterizer<V, A, S>,
     DF: Fn(f32, f32) -> bool,
 {
-    pub fn new(descriptor: PipelineDescriptor<VS, SA, C, R, DF, FS, B>) -> Self {
+    pub fn new(descriptor: PipelineDescriptor<VS, SA, C, R, DF, FS, B, S>) -> Self {
         Self {
             vertex_shader: descriptor.vertex_shader,
             shape_assembler: descriptor.shape_assembler,
@@ -273,6 +357,7 @@ where
             depth_state: descriptor.depth_state,
             fragment_shader: descriptor.fragment_shader,
             blend_function: descriptor.blend_function,
+            multisample_state: descriptor.multisample_state,
         }
     }
 
@@ -281,8 +366,8 @@ where
         vertex_buffer: &[VI],
         index_buffer: &[u32],
         uniforms: U,
-        render_buffer: &mut Buffer<T, 1>,
-        mut depth_buffer: Option<&mut Buffer<f32, 1>>,
+        render_buffer: &mut Buffer<T, S>,
+        depth_buffer: Option<&mut Buffer<f32, S>>,
     ) where
         VI: Copy,
         U: Copy,
@@ -291,9 +376,10 @@ where
         FS: Fn(FragmentInput<A>, U) -> T,
         B: Fn(&T, &T) -> T,
     {
-        if self.depth_state.is_some() && depth_buffer.is_none() {
-            panic!("Attempting to draw using pipeline that requires depth buffer without a depth buffer");
-        }
+        assert!(
+            !(self.depth_state.is_some() && depth_buffer.is_none()),
+            "cannot draw using pipeline that requires depth buffer without a depth buffer"
+        );
         let width = render_buffer.width();
         let height = render_buffer.height();
 
@@ -309,29 +395,20 @@ where
             })
         };
 
-        let mut rasterizer_action = |fragment_input: FragmentInput<A>| {
-            let [x, y] = fragment_input.position.xy().as_uvec2().to_array();
+        let mut fragment_tools = FragmentTools {
+            uniforms,
+            fragment_shader: &self.fragment_shader,
+            blend_function: &self.blend_function,
+            render_buffer: render_buffer,
+        };
 
-            if let Some(depth_state) = &self.depth_state {
-                let depth_buffer = depth_buffer.as_mut().unwrap();
-                let src_depth = fragment_input.position.z;
-                let dst_depth = depth_buffer[[x, y, 0]];
-                let depth_test_passed = (depth_state.depth_function)(src_depth, dst_depth);
-
-                if depth_test_passed {
-                    let src_color = (self.fragment_shader)(fragment_input, uniforms);
-                    let dst_color = render_buffer[[x, y, 0]];
-                    render_buffer[[x, y, 0]] = (self.blend_function)(&src_color, &dst_color);
-
-                    if depth_state.write_depth {
-                        depth_buffer[[x, y, 0]] = src_depth;
-                    }
-                }
-            } else {
-                let src_color = (self.fragment_shader)(fragment_input, uniforms);
-                let dst_color = render_buffer[[x, y, 0]];
-                render_buffer[[x, y, 0]] = (self.blend_function)(&src_color, &dst_color);
-            }
+        let mut depth_tools = if let Some(depth_state) = &self.depth_state {
+            Some(DepthTools {
+                depth_state,
+                depth_buffer: depth_buffer.unwrap(),
+            })
+        } else {
+            None
         };
 
         self.rasterizer.set_screen_size(width, height);
@@ -347,15 +424,22 @@ where
             .map(|shape| (self.clipper)(shape).into_iter())
             .flatten()
             .map(perspective_divide)
-            .for_each(|shape| self.rasterizer.rasterize(shape, &mut rasterizer_action));
+            .for_each(|shape| {
+                self.rasterizer.rasterize(
+                    shape,
+                    &mut fragment_tools,
+                    &mut depth_tools,
+                    &self.multisample_state,
+                )
+            });
     }
 
     pub fn draw<VI, U, T>(
         &mut self,
         vertex_buffer: &[VI],
         unforms: U,
-        render_buffer: &mut Buffer<T, 1>,
-        depth_buffer: Option<&mut Buffer<f32, 1>>,
+        render_buffer: &mut Buffer<T, S>,
+        depth_buffer: Option<&mut Buffer<f32, S>>,
     ) where
         VI: Copy,
         U: Copy,

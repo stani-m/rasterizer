@@ -11,7 +11,7 @@ use rasterizer::presenter::WgpuPresenter;
 use rasterizer::rasterizer::{CullFace, EdgeFunctionRasterizer};
 use rasterizer::{
     blend_function, clipper, depth_function, Buffer, Color, DepthState, FragmentInput,
-    ListShapeAssembler, Pipeline, PipelineDescriptor,
+    ListShapeAssembler, MultisampleState, Pipeline, PipelineDescriptor,
 };
 
 #[path = "../model.rs"]
@@ -27,8 +27,9 @@ fn main() {
         .build(&event_loop)
         .unwrap();
 
-    let mut render_buffer = Buffer::<Color, 1>::new(width, height);
-    let mut depth_buffer = Buffer::<f32, 1>::new(width, height);
+    let mut framebuffer = Buffer::new(width, height);
+    let mut render_buffer = Buffer::new(width, height);
+    let mut depth_buffer = Buffer::new(width, height);
     let mut presenter = WgpuPresenter::new(&window, width, height, true);
     let mut pipeline = Pipeline::new(PipelineDescriptor {
         vertex_shader: |(position, uv): (glam::Vec3, glam::Vec2), transform: glam::Mat4| {
@@ -46,8 +47,7 @@ fn main() {
         }),
         fragment_shader: |fragment_input: FragmentInput<2>, _| {
             let uv = glam::Vec2::from(fragment_input.attributes);
-            let pos = uv * 24.0;
-            let pos = glam::ivec2(pos.x as i32, pos.y as i32) % 2;
+            let pos = (uv * 24.0).as_ivec2() % 2;
             if pos.x == pos.y {
                 Color::new(0.0, 1.0, 1.0, 1.0)
             } else {
@@ -55,6 +55,7 @@ fn main() {
             }
         },
         blend_function: blend_function::replace,
+        multisample_state: MultisampleState::X4,
     });
 
     let (document, buffers, _) = gltf::import("examples/assets/Cube.gltf")
@@ -94,6 +95,7 @@ fn main() {
             WindowEvent::Resized(size) => {
                 let width = size.width;
                 let height = size.height;
+                framebuffer.resize(width, height);
                 render_buffer.resize(width, height);
                 depth_buffer.resize(width, height);
                 presenter.resize(width, height);
@@ -137,7 +139,9 @@ fn main() {
                 Some(&mut depth_buffer),
             );
 
-            presenter.present(&render_buffer);
+            render_buffer.resolve(&mut framebuffer);
+
+            presenter.present(&framebuffer);
 
             last_frame_time = current_frame_time;
         }

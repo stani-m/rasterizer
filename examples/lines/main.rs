@@ -11,7 +11,7 @@ use rasterizer::presenter::WgpuPresenter;
 use rasterizer::rasterizer::BresenhamLineRasterizer;
 use rasterizer::{
     blend_function, clipper, depth_function, Buffer, Color, DepthState, FragmentInput,
-    ListShapeAssembler, Pipeline, PipelineDescriptor,
+    ListShapeAssembler, MultisampleState, Pipeline, PipelineDescriptor,
 };
 
 #[path = "../model.rs"]
@@ -27,8 +27,8 @@ fn main() {
         .build(&event_loop)
         .unwrap();
 
-    let mut render_buffer = Buffer::<Color, 1>::new(width, height);
-    let mut depth_buffer = Buffer::<f32, 1>::new(width, height);
+    let mut render_buffer = Buffer::new(width, height);
+    let mut depth_buffer = Buffer::new(width, height);
     let mut presenter = WgpuPresenter::new(&window, width, height, true);
     let mut pipeline = Pipeline::new(PipelineDescriptor {
         vertex_shader: |vertex, (transform, _)| {
@@ -41,12 +41,13 @@ fn main() {
         shape_assembler: ListShapeAssembler::new(),
         clipper: clipper::simple,
         rasterizer: BresenhamLineRasterizer::new(),
-        depth_state: DepthState {
+        depth_state: Some(DepthState {
             depth_function: depth_function::less_or_equal,
             write_depth: true,
-        },
+        }),
         fragment_shader: |_, (_, color)| color,
         blend_function: blend_function::replace,
+        multisample_state: MultisampleState::SINGLE_SAMPLE,
     });
 
     let (document, buffers, _) = gltf::import("examples/assets/TheDonut.gltf")
@@ -119,7 +120,7 @@ fn main() {
                 donut.index_buffer(),
                 (transform, Color::new(0.0, 1.0, 1.0, 1.0)),
                 &mut render_buffer,
-                &mut depth_buffer,
+                Some(&mut depth_buffer),
             );
             for child in donut.children() {
                 pipeline.draw_indexed(
@@ -130,7 +131,7 @@ fn main() {
                         Color::new(1.0, 0.0, 1.0, 1.0),
                     ),
                     &mut render_buffer,
-                    &mut depth_buffer,
+                    Some(&mut depth_buffer),
                 );
             }
 

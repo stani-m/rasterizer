@@ -1,12 +1,70 @@
 use std::mem;
+use std::ops::{Add, Mul};
 
 use glam::Vec4Swizzles;
 
-use crate::FragmentInput;
+use crate::{Buffer, DepthState, FragmentInput, MultisampleState, PixelCenterOffset};
 
-pub trait Rasterizer<const A: usize, const V: usize> {
+pub trait Rasterizer<const V: usize, const A: usize, const S: usize> {
     fn set_screen_size(&mut self, width: u32, height: u32);
-    fn rasterize(&self, shape: [FragmentInput<A>; V], action: &mut impl FnMut(FragmentInput<A>));
+    fn rasterize<'a, U, T, DF, FS, B>(
+        &self,
+        shape: [FragmentInput<A>; V],
+        fragment_tools: &mut FragmentTools<'a, U, T, FS, B, A, S>,
+        depth_tools: &mut Option<DepthTools<'a, DF, S>>,
+        multisample_state: &MultisampleState<S>,
+    ) where
+        U: Copy,
+        T: Copy + Default,
+        DF: Fn(f32, f32) -> bool,
+        FS: Fn(FragmentInput<A>, U) -> T,
+        B: Fn(&T, &T) -> T;
+}
+
+pub struct FragmentTools<'a, U, T, FS, B, const A: usize, const S: usize>
+where
+    U: Copy,
+    T: Copy + Default,
+    FS: Fn(FragmentInput<A>, U) -> T,
+    B: Fn(&T, &T) -> T,
+{
+    pub(crate) uniforms: U,
+    pub(crate) fragment_shader: &'a FS,
+    pub(crate) blend_function: &'a B,
+    pub(crate) render_buffer: &'a mut Buffer<T, S>,
+}
+
+impl<'a, U, T, FS, B, const A: usize, const S: usize> FragmentTools<'a, U, T, FS, B, A, S>
+where
+    U: Copy,
+    T: Copy + Default,
+    FS: Fn(FragmentInput<A>, U) -> T,
+    B: Fn(&T, &T) -> T,
+{
+    fn shade_fragment(&self, fragment_input: FragmentInput<A>) -> T {
+        (self.fragment_shader)(fragment_input, self.uniforms)
+    }
+
+    fn blend_and_write(&mut self, x: u32, y: u32, sample: u32, value: &T) {
+        let dst_value = &self.render_buffer[[x, y, sample]];
+        self.render_buffer[[x, y, sample]] = (self.blend_function)(value, dst_value);
+    }
+}
+
+pub struct DepthTools<'a, DF: Fn(f32, f32) -> bool, const S: usize> {
+    pub(crate) depth_state: &'a DepthState<DF>,
+    pub(crate) depth_buffer: &'a mut Buffer<f32, S>,
+}
+
+impl<'a, DF: Fn(f32, f32) -> bool, const S: usize> DepthTools<'a, DF, S> {
+    fn compare(&self, x: u32, y: u32, sample: u32, depth: f32) -> bool {
+        let dst_depth = self.depth_buffer[[x, y, sample]];
+        (self.depth_state.depth_function)(depth, dst_depth)
+    }
+
+    fn write(&mut self, x: u32, y: u32, sample: u32, depth: f32) {
+        self.depth_buffer[[x, y, sample]] = depth;
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -24,14 +82,26 @@ impl BresenhamLineRasterizer {
     }
 }
 
-impl<const A: usize> Rasterizer<A, 2> for BresenhamLineRasterizer {
+impl<const A: usize, const S: usize> Rasterizer<2, A, S> for BresenhamLineRasterizer {
     fn set_screen_size(&mut self, width: u32, height: u32) {
         self.width = width as i32;
         self.height = height as i32;
     }
 
-    fn rasterize(&self, line: [FragmentInput<A>; 2], action: &mut impl FnMut(FragmentInput<A>)) {
-        let [mut from, mut to] = line;
+    fn rasterize<'a, U, T, DF, FS, B>(
+        &self,
+        shape: [FragmentInput<A>; 2],
+        fragment_tools: &mut FragmentTools<'a, U, T, FS, B, A, S>,
+        depth_tools: &mut Option<DepthTools<'a, DF, S>>,
+        _: &MultisampleState<S>,
+    ) where
+        U: Copy,
+        T: Copy + Default,
+        DF: Fn(f32, f32) -> bool,
+        FS: Fn(FragmentInput<A>, U) -> T,
+        B: Fn(&T, &T) -> T,
+    {
+        let [mut from, mut to] = shape;
         let [mut x0, mut y0] = from.position.xy().round().as_ivec2().to_array();
         let [mut x1, mut y1] = to.position.xy().round().as_ivec2().to_array();
         let mut run = x1 - x0;
@@ -44,10 +114,39 @@ impl<const A: usize> Rasterizer<A, 2> for BresenhamLineRasterizer {
                 let z = zw[0];
                 if width_range.contains(&x) && height_range.contains(&y) && depth_range.contains(&z)
                 {
-                    action(FragmentInput {
-                        position: glam::vec4(x as f32, y as f32, zw[0], zw[1]),
-                        attributes,
-                    });
+                    for sample in 0..(S as u32) {
+                        if let Some(depth_tools) = depth_tools {
+                            let depth_test_passed =
+                                depth_tools.compare(x as u32, y as u32, sample, z);
+                            if depth_test_passed {
+                                let fragment_value = fragment_tools.shade_fragment(FragmentInput {
+                                    position: glam::vec4(x as f32, y as f32, z, zw[1]),
+                                    attributes,
+                                });
+                                fragment_tools.blend_and_write(
+                                    x as u32,
+                                    y as u32,
+                                    sample,
+                                    &fragment_value,
+                                );
+
+                                if depth_tools.depth_state.write_depth {
+                                    depth_tools.write(x as u32, y as u32, sample, z);
+                                }
+                            }
+                        } else {
+                            let fragment_value = fragment_tools.shade_fragment(FragmentInput {
+                                position: glam::vec4(x as f32, y as f32, z, zw[1]),
+                                attributes,
+                            });
+                            fragment_tools.blend_and_write(
+                                x as u32,
+                                y as u32,
+                                sample,
+                                &fragment_value,
+                            );
+                        }
+                    }
                 }
             };
         if run == 0 {
@@ -131,17 +230,25 @@ impl BresenhamTriangleRasterizer {
     }
 }
 
-impl<const A: usize> Rasterizer<A, 3> for BresenhamTriangleRasterizer {
+impl<const A: usize, const S: usize> Rasterizer<3, A, S> for BresenhamTriangleRasterizer {
     fn set_screen_size(&mut self, width: u32, height: u32) {
         self.width = width as i32;
         self.height = height as i32;
     }
 
-    fn rasterize(
+    fn rasterize<'a, U, T, DF, FS, B>(
         &self,
-        triangle: [FragmentInput<A>; 3],
-        action: &mut impl FnMut(FragmentInput<A>),
-    ) {
+        shape: [FragmentInput<A>; 3],
+        fragment_tools: &mut FragmentTools<'a, U, T, FS, B, A, S>,
+        depth_tools: &mut Option<DepthTools<'a, DF, S>>,
+        _: &MultisampleState<S>,
+    ) where
+        U: Copy,
+        T: Copy + Default,
+        DF: Fn(f32, f32) -> bool,
+        FS: Fn(FragmentInput<A>, U) -> T,
+        B: Fn(&T, &T) -> T,
+    {
         let width_range = 0..self.width;
         let height_range = 0..self.height;
         let depth_range = 0.0..=1.0;
@@ -150,16 +257,45 @@ impl<const A: usize> Rasterizer<A, 3> for BresenhamTriangleRasterizer {
                 let z = zw[0];
                 if width_range.contains(&x) && height_range.contains(&y) && depth_range.contains(&z)
                 {
-                    action(FragmentInput {
-                        position: glam::vec4(x as f32, y as f32, zw[0], zw[1]),
-                        attributes,
-                    });
+                    for sample in 0..(S as u32) {
+                        if let Some(depth_tools) = depth_tools {
+                            let depth_test_passed =
+                                depth_tools.compare(x as u32, y as u32, sample, z);
+                            if depth_test_passed {
+                                let fragment_value = fragment_tools.shade_fragment(FragmentInput {
+                                    position: glam::vec4(x as f32, y as f32, z, zw[1]),
+                                    attributes,
+                                });
+                                fragment_tools.blend_and_write(
+                                    x as u32,
+                                    y as u32,
+                                    sample,
+                                    &fragment_value,
+                                );
+
+                                if depth_tools.depth_state.write_depth {
+                                    depth_tools.write(x as u32, y as u32, sample, z);
+                                }
+                            }
+                        } else {
+                            let fragment_value = fragment_tools.shade_fragment(FragmentInput {
+                                position: glam::vec4(x as f32, y as f32, z, zw[1]),
+                                attributes,
+                            });
+                            fragment_tools.blend_and_write(
+                                x as u32,
+                                y as u32,
+                                sample,
+                                &fragment_value,
+                            );
+                        }
+                    }
                 }
             };
 
-        let mut top = &triangle[0];
-        let mut left = &triangle[1];
-        let mut right = &triangle[2];
+        let mut top = &shape[0];
+        let mut left = &shape[1];
+        let mut right = &shape[2];
 
         if left.position.y > top.position.y {
             mem::swap(&mut top, &mut left);
@@ -402,13 +538,25 @@ impl EdgeFunctionRasterizer {
     }
 }
 
-impl<const A: usize> Rasterizer<A, 3> for EdgeFunctionRasterizer {
+impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasterizer {
     fn set_screen_size(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
     }
 
-    fn rasterize(&self, shape: [FragmentInput<A>; 3], action: &mut impl FnMut(FragmentInput<A>)) {
+    fn rasterize<'a, U, T, DF, FS, B>(
+        &self,
+        shape: [FragmentInput<A>; 3],
+        fragment_tools: &mut FragmentTools<'a, U, T, FS, B, A, S>,
+        depth_tools: &mut Option<DepthTools<'a, DF, S>>,
+        multisample_state: &MultisampleState<S>,
+    ) where
+        U: Copy,
+        T: Copy + Default,
+        DF: Fn(f32, f32) -> bool,
+        FS: Fn(FragmentInput<A>, U) -> T,
+        B: Fn(&T, &T) -> T,
+    {
         let v0 = &shape[0];
         let v1 = &shape[1];
         let v2 = &shape[2];
@@ -447,63 +595,206 @@ impl<const A: usize> Rasterizer<A, 3> for EdgeFunctionRasterizer {
                 max_bound.y = vertex.y;
             }
         }
-        let min_bound = min_bound.floor().as_ivec2().max(glam::ivec2(0, 0));
+        let min_bound = min_bound.max(glam::vec2(0.0, 0.0)).as_uvec2();
         let max_bound = max_bound
+            .min(glam::vec2(self.width as f32, self.height as f32))
             .ceil()
-            .as_ivec2()
-            .min(glam::ivec2(self.width as i32, self.height as i32));
+            .as_uvec2();
 
         let w0_base = (v1.position.x * v2.position.y - v1.position.y * v2.position.x) * inv_area;
         let w1_base = (v2.position.x * v0.position.y - v2.position.y * v0.position.x) * inv_area;
         let w2_base = (v0.position.x * v1.position.y - v0.position.y * v1.position.x) * inv_area;
 
-        let w0_x_comp = (v1.position.y - v2.position.y) * inv_area;
-        let w1_x_comp = (v2.position.y - v0.position.y) * inv_area;
-        let w2_x_comp = (v0.position.y - v1.position.y) * inv_area;
+        let w0_x_delta = (v1.position.y - v2.position.y) * inv_area;
+        let w1_x_delta = (v2.position.y - v0.position.y) * inv_area;
+        let w2_x_delta = (v0.position.y - v1.position.y) * inv_area;
 
-        let w0_y_comp = (v2.position.x - v1.position.x) * inv_area;
-        let w1_y_comp = (v0.position.x - v2.position.x) * inv_area;
-        let w2_y_comp = (v1.position.x - v0.position.x) * inv_area;
+        let w0_y_delta = (v2.position.x - v1.position.x) * inv_area;
+        let w1_y_delta = (v0.position.x - v2.position.x) * inv_area;
+        let w2_y_delta = (v1.position.x - v0.position.x) * inv_area;
 
-        for y in min_bound.y..max_bound.y {
-            let y = y as f32 + 0.5;
-            let w0_row = w0_y_comp * y + w0_base;
-            let w1_row = w1_y_comp * y + w1_base;
-            let w2_row = w2_y_comp * y + w2_base;
-            for x in min_bound.x..max_bound.x {
-                let x = x as f32 + 0.5;
-                let w0 = w0_x_comp * x + w0_row;
-                let w1 = w1_x_comp * x + w1_row;
-                let w2 = w2_x_comp * x + w2_row;
-                if w0.to_bits() >> 31 == w1.to_bits() >> 31
-                    && w1.to_bits() >> 31 == w2.to_bits() >> 31
-                {
-                    let res_zw =
-                        v0.position.zw() * w0 + v1.position.zw() * w1 + v2.position.zw() * w2;
-                    let pos = glam::vec4(x, y, res_zw[0], res_zw[1]);
-                    if 0.0 < pos.z && pos.z < 1.0 {
-                        let inv_w = 1.0 / res_zw[1];
-                        let mut res_attribs = [0.0; A];
-                        for ((&v0_attrib, &v1_attrib, &v2_attrib), res_attrib) in v0
-                            .attributes
-                            .iter()
-                            .zip(&v1.attributes)
-                            .zip(&v2.attributes)
-                            .map(|v012_attribs| {
-                                (v012_attribs.0 .0, v012_attribs.0 .1, v012_attribs.1)
-                            })
-                            .zip(&mut res_attribs)
-                        {
-                            *res_attrib =
-                                (v0_attrib * w0 + v1_attrib * w1 + v2_attrib * w2) * inv_w;
+        let w0_static_data = StaticData {
+            base: w0_base,
+            x_delta: w0_x_delta,
+            y_delta: w0_y_delta,
+        };
+        let w1_static_data = StaticData {
+            base: w1_base,
+            x_delta: w1_x_delta,
+            y_delta: w1_y_delta,
+        };
+        let w2_static_data = StaticData {
+            base: w2_base,
+            x_delta: w2_x_delta,
+            y_delta: w2_y_delta,
+        };
+
+        let mut samples = [SampleData {
+            w0: BarycentricCoordinate::new(&w0_static_data),
+            w1: BarycentricCoordinate::new(&w1_static_data),
+            w2: BarycentricCoordinate::new(&w2_static_data),
+        }; S];
+
+        for x in min_bound.x..max_bound.x {
+            let x_float = x as f32;
+            for i in 0..S {
+                samples[i].compute_row_bary_coords(x_float + multisample_state.sample_offsets[i].x);
+            }
+            for y in min_bound.y..max_bound.y {
+                let y_float = y as f32;
+                let mut covered_samples = [(0, 0.0); S];
+                let mut covered_samples_len = 0;
+                for i in 0..S {
+                    let sample = &mut samples[i];
+                    sample.compute_barycentric_coords(
+                        y_float + multisample_state.sample_offsets[i].y,
+                    );
+                    if sample.is_in_triangle() {
+                        let depth = sample.interpolate(v0.position.z, v1.position.z, v2.position.z);
+                        if 0.0 < depth && depth < 1.0 {
+                            let depth_test_passed =
+                                depth_tools.as_ref().map_or(true, |depth_tools| {
+                                    depth_tools.compare(x, y, i as u32, depth)
+                                });
+                            if depth_test_passed {
+                                unsafe {
+                                    *covered_samples.get_unchecked_mut(covered_samples_len) =
+                                        (i as u32, depth);
+                                }
+                                covered_samples_len += 1;
+                            }
                         }
-                        action(FragmentInput {
-                            position: pos,
-                            attributes: res_attribs,
-                        })
+                    }
+                }
+                if covered_samples_len != 0 {
+                    let (fragment_sample, xy) = match multisample_state.center_offset {
+                        PixelCenterOffset::Index(i) => {
+                            let xy =
+                                glam::vec2(x_float, y_float) + multisample_state.sample_offsets[i];
+                            (samples[i], xy)
+                        }
+                        PixelCenterOffset::Offset(offset) => {
+                            let mut fragment_sample = SampleData {
+                                w0: BarycentricCoordinate::new(&w0_static_data),
+                                w1: BarycentricCoordinate::new(&w1_static_data),
+                                w2: BarycentricCoordinate::new(&w2_static_data),
+                            };
+                            let xy = glam::vec2(x_float, y_float) + offset;
+                            fragment_sample.compute_row_bary_coords(xy.x);
+                            fragment_sample.compute_barycentric_coords(xy.y);
+                            (fragment_sample, xy)
+                        }
+                    };
+                    let zw = fragment_sample.interpolate(
+                        v0.position.zw(),
+                        v1.position.zw(),
+                        v2.position.zw(),
+                    );
+                    let position = (xy, zw).into();
+                    let inv_w = 1.0 / zw[1];
+                    let attributes = fragment_sample
+                        .interpolate_arr(&v0.attributes, &v1.attributes, &v2.attributes)
+                        .map(|attr| attr * inv_w);
+                    let fragment_value = fragment_tools.shade_fragment(FragmentInput {
+                        position,
+                        attributes,
+                    });
+                    for i in 0..covered_samples_len {
+                        let (sample, depth) = unsafe { *covered_samples.get_unchecked(i) };
+                        if let Some(depth_tools) = depth_tools {
+                            depth_tools.write(x, y, sample, depth);
+                        }
+                        fragment_tools.blend_and_write(x, y, sample, &fragment_value);
                     }
                 }
             }
         }
+    }
+}
+
+struct StaticData {
+    base: f32,
+    x_delta: f32,
+    y_delta: f32,
+}
+
+#[derive(Copy, Clone)]
+struct BarycentricCoordinate<'a> {
+    static_data: &'a StaticData,
+    row_value: f32,
+    value: f32,
+}
+
+impl<'a> BarycentricCoordinate<'a> {
+    fn new(static_data: &'a StaticData) -> Self {
+        Self {
+            static_data,
+            row_value: 0.0,
+            value: 0.0,
+        }
+    }
+
+    fn compute_row(&mut self, x: f32) {
+        self.row_value = self.static_data.x_delta * x + self.static_data.base;
+    }
+
+    fn compute_value(&mut self, y: f32) {
+        self.value = self.static_data.y_delta * y + self.row_value;
+    }
+}
+
+#[derive(Copy, Clone)]
+struct SampleData<'a> {
+    w0: BarycentricCoordinate<'a>,
+    w1: BarycentricCoordinate<'a>,
+    w2: BarycentricCoordinate<'a>,
+}
+
+impl<'a> SampleData<'a> {
+    fn compute_row_bary_coords(&mut self, x: f32) {
+        self.w0.compute_row(x);
+        self.w1.compute_row(x);
+        self.w2.compute_row(x);
+    }
+
+    fn compute_barycentric_coords(&mut self, y: f32) {
+        self.w0.compute_value(y);
+        self.w1.compute_value(y);
+        self.w2.compute_value(y);
+    }
+
+    fn interpolate<T>(&self, v0: T, v1: T, v2: T) -> T
+        where
+            T: Mul<f32, Output = T> + Add<Output = T>,
+    {
+        v0 * self.w0.value + v1 * self.w1.value + v2 * self.w2.value
+    }
+
+    fn interpolate_arr<T, const N: usize>(
+        &self,
+        a0: &[T; N],
+        a1: &[T; N],
+        a2: &[T; N],
+    ) -> [T; N]
+        where
+            T: Mul<f32, Output = T> + Add<Output = T> + Copy + Default,
+    {
+        let mut res_arr = [Default::default(); N];
+        for ((&v0_elem, &v1_elem, &v2_elem), res_elem) in a0
+            .iter()
+            .zip(a1)
+            .zip(a2)
+            .map(|v012_elements| (v012_elements.0 .0, v012_elements.0 .1, v012_elements.1))
+            .zip(&mut res_arr)
+        {
+            *res_elem =
+                v0_elem * self.w0.value + v1_elem * self.w1.value + v2_elem * self.w2.value;
+        }
+        res_arr
+    }
+
+    fn is_in_triangle(&self) -> bool {
+        self.w0.value.to_bits() >> 31 == self.w1.value.to_bits() >> 31
+            && self.w1.value.to_bits() >> 31 == self.w2.value.to_bits() >> 31
     }
 }

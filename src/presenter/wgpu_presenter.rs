@@ -237,7 +237,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         })
     }
 
-    pub fn present(&self, framebuffer: &Buffer<Color, 1>) {
+    pub fn present(&self, framebuffer: &Buffer<Color>) {
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.texture,
