@@ -52,7 +52,7 @@ fn main() {
 
     let (document, buffers, _) = gltf::import("examples/assets/TheDonut.gltf")
         .expect("glTF import failed, file probably not found, make sure to run examples from crate root directory");
-    let mut donut = Model::from(&document, &buffers[0]);
+    let mut donut = Model::new(&document, &buffers[0]);
     donut.transform_triangles_to_lines();
 
     let zoom = glam::Mat4::from_scale(glam::vec3(20.0, 20.0, 20.0));

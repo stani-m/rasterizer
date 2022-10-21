@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::iter::Sum;
 use std::ops::{Add, Div, Index, IndexMut};
 
@@ -12,36 +13,48 @@ pub mod presenter;
 pub mod rasterizer;
 
 #[derive(Clone, Debug)]
-pub struct Buffer<T: Copy + Default, const S: usize = 1> {
+pub struct Buffer<T, const S: usize = 1> {
     data: Vec<[T; S]>,
     width: u32,
     height: u32,
 }
 
-impl<T: Copy + Default, const S: usize> Buffer<T, S> {
-    pub fn new(width: u32, height: u32) -> Self {
+impl<T: Copy, const S: usize> Buffer<T, S> {
+    pub fn new(width: u32, height: u32) -> Self
+    where
+        T: Default,
+    {
+        Self::new_with(width, height, T::default())
+    }
+
+    pub fn new_with(width: u32, height: u32, value: T) -> Self {
         assert!(S > 0, "buffer cannot have 0 samples");
-        let size = width * height;
         Self {
-            data: vec![[T::default(); S]; size as usize],
+            data: vec![[value; S]; (width * height) as usize],
             width,
             height,
         }
     }
 
-    fn width(&self) -> u32 {
+    pub fn width(&self) -> u32 {
         self.width
     }
 
-    fn height(&self) -> u32 {
+    pub fn height(&self) -> u32 {
         self.height
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
+    pub fn resize(&mut self, width: u32, height: u32)
+    where
+        T: Default,
+    {
+        self.resize_with(width, height, T::default());
+    }
+
+    pub fn resize_with(&mut self, width: u32, height: u32, value: T) {
         self.width = width;
         self.height = height;
-        self.data
-            .resize((width * height) as usize, [T::default(); S]);
+        self.data.resize((width * height) as usize, [value; S]);
     }
 
     pub fn fill(&mut self, value: T) {
@@ -346,7 +359,7 @@ where
     SA: ShapeAssembler<u32, V>,
     C: FnMut([FragmentInput<A>; V]) -> Vec<[FragmentInput<A>; V]>,
     R: Rasterizer<V, A, S>,
-    DF: Fn(f32, f32) -> bool,
+    DF: Fn(f32, f32) -> bool + Sync,
 {
     pub fn new(descriptor: PipelineDescriptor<VS, SA, C, R, DF, FS, B, S>) -> Self {
         Self {
@@ -370,11 +383,11 @@ where
         depth_buffer: Option<&mut Buffer<f32, S>>,
     ) where
         VI: Copy,
-        U: Copy,
-        T: Copy + Default,
+        U: Copy + Send,
+        T: Copy + Default + Send,
         VS: Fn(VI, U) -> FragmentInput<A>,
-        FS: Fn(FragmentInput<A>, U) -> T,
-        B: Fn(&T, &T) -> T,
+        FS: Fn(FragmentInput<A>, U) -> T + Sync,
+        B: Fn(&T, &T) -> T + Sync,
     {
         assert!(
             !(self.depth_state.is_some() && depth_buffer.is_none()),
@@ -395,21 +408,8 @@ where
             })
         };
 
-        let mut fragment_tools = FragmentTools {
-            uniforms,
-            fragment_shader: &self.fragment_shader,
-            blend_function: &self.blend_function,
-            render_buffer: render_buffer,
-        };
-
-        let mut depth_tools = if let Some(depth_state) = &self.depth_state {
-            Some(DepthTools {
-                depth_state,
-                depth_buffer: depth_buffer.unwrap(),
-            })
-        } else {
-            None
-        };
+        // The unwrapped depth_buffer value will never be used if depth_buffer was none
+        let depth_buffer = unsafe { depth_buffer.unwrap_unchecked() };
 
         self.rasterizer.set_screen_size(width, height);
         let shaded_vertices = vertex_buffer
@@ -425,12 +425,24 @@ where
             .flatten()
             .map(perspective_divide)
             .for_each(|shape| {
+                let mut fragment_tools = FragmentTools {
+                    uniforms,
+                    fragment_shader: &self.fragment_shader,
+                    blend_function: &self.blend_function,
+                    render_buffer: render_buffer,
+                };
+
+                let mut depth_tools = self.depth_state.as_mut().map(|depth_state| DepthTools {
+                    depth_state,
+                    depth_buffer,
+                });
+
                 self.rasterizer.rasterize(
                     shape,
                     &mut fragment_tools,
                     &mut depth_tools,
                     &self.multisample_state,
-                )
+                );
             });
     }
 
@@ -442,11 +454,11 @@ where
         depth_buffer: Option<&mut Buffer<f32, S>>,
     ) where
         VI: Copy,
-        U: Copy,
-        T: Copy + Default,
+        U: Copy + Send,
+        T: Copy + Default + Send,
         VS: Fn(VI, U) -> FragmentInput<A>,
-        FS: Fn(FragmentInput<A>, U) -> T,
-        B: Fn(&T, &T) -> T,
+        FS: Fn(FragmentInput<A>, U) -> T + Sync,
+        B: Fn(&T, &T) -> T + Sync,
     {
         let index_buffer = (0..vertex_buffer.len() as u32).collect::<Vec<_>>();
         self.draw_indexed(
@@ -460,7 +472,7 @@ where
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct FragmentInput<const A: usize> {
+pub struct FragmentInput<const A: usize = 0> {
     pub position: glam::Vec4,
     pub attributes: [f32; A],
 }

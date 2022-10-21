@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::time::Instant;
 
 use winit::dpi::PhysicalSize;
@@ -8,7 +9,9 @@ use winit::window::WindowBuilder;
 
 use model::Model;
 use rasterizer::presenter::WgpuPresenter;
-use rasterizer::rasterizer::{CullFace, EdgeFunctionRasterizer};
+use rasterizer::rasterizer::{
+    EdgeFunctionRasterizerTiled, EdgeFunctionRasterizerTiledDescriptor, Face,
+};
 use rasterizer::{
     blend_function, clipper, depth_function, Buffer, Color, DepthState, FragmentInput,
     ListShapeAssembler, MultisampleState, Pipeline, PipelineDescriptor,
@@ -30,7 +33,7 @@ fn main() {
     let mut framebuffer = Buffer::new(width, height);
     let mut render_buffer = Buffer::new(width, height);
     let mut depth_buffer = Buffer::new(width, height);
-    let mut presenter = WgpuPresenter::new(&window, width, height, true);
+    let mut presenter = WgpuPresenter::new(&window, width, height, false);
     let mut pipeline = Pipeline::new(PipelineDescriptor {
         vertex_shader: |(position, uv): (glam::Vec3, glam::Vec2), transform: glam::Mat4| {
             FragmentInput {
@@ -40,10 +43,14 @@ fn main() {
         },
         shape_assembler: ListShapeAssembler::new(),
         clipper: clipper::simple,
-        rasterizer: EdgeFunctionRasterizer::new(Some(CullFace::Ccw)),
+        rasterizer: EdgeFunctionRasterizerTiled::new(EdgeFunctionRasterizerTiledDescriptor {
+            cull_face: Some(Face::Ccw),
+            tile_size: NonZeroU32::new(32).unwrap(),
+            thread_count: 0,
+        }),
         depth_state: Some(DepthState {
-            depth_function: depth_function::less_or_equal,
-            write_depth: true,
+            depth_function: depth_function::always_pass,
+            write_depth: false,
         }),
         fragment_shader: |fragment_input: FragmentInput<2>, _| {
             let uv = glam::Vec2::from(fragment_input.attributes);
@@ -60,7 +67,7 @@ fn main() {
 
     let (document, buffers, _) = gltf::import("examples/assets/Cube.gltf")
         .expect("glTF import failed, file probably not found, make sure to run examples from crate root directory");
-    let mut cube = Model::from(&document, &buffers[0]);
+    let mut cube = Model::new(&document, &buffers[0]);
     let uvs: Vec<glam::Vec2> =
         cube.load_vertex_attribute(gltf::Semantic::TexCoords(0), &buffers[0]);
     let cube_vertex_uv_buffer = cube
@@ -132,7 +139,7 @@ fn main() {
             render_buffer.fill(Color::default());
             depth_buffer.fill(1.0);
             pipeline.draw_indexed(
-                cube_vertex_uv_buffer.as_slice(),
+                &cube_vertex_uv_buffer,
                 &cube.index_buffer(),
                 transform,
                 &mut render_buffer,

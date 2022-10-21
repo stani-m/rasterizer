@@ -41,7 +41,7 @@ pub struct Model<'a> {
 }
 
 impl<'a> Model<'a> {
-    pub fn from(gltf: &'a gltf::Document, buffer: &[u8]) -> Self {
+    pub fn new(gltf: &'a gltf::Document, buffer: &[u8]) -> Self {
         let scene = gltf.default_scene().unwrap();
         let node = scene.nodes().nth(0).unwrap();
         Self::from_node(node, buffer)
