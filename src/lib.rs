@@ -3,6 +3,9 @@ use std::iter::Sum;
 use std::ops::{Add, Div, Index, IndexMut};
 
 use glam::Vec4Swizzles;
+use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 
 use rasterizer::Rasterizer;
 
@@ -304,33 +307,164 @@ pub enum PixelCenterOffset {
     Offset(glam::Vec2),
 }
 
+pub trait Multisampler<const S: usize> {
+    fn x_offsets(&self, x: u32, y: u32) -> [f32; S];
+    fn y_offsets(&self) -> &[f32; S];
+    fn center_offset(&self) -> PixelCenterOffset;
+}
+
 #[derive(Copy, Clone, Debug)]
-pub struct MultisampleState<const S: usize> {
-    pub sample_offsets: [glam::Vec2; S],
+pub struct StaticMultisampler<const S: usize> {
+    pub x_offsets: [f32; S],
+    pub y_offsets: [f32; S],
     pub center_offset: PixelCenterOffset,
 }
 
-impl MultisampleState<1> {
-    pub const SINGLE_SAMPLE: Self = Self {
-        sample_offsets: [glam::vec2(0.5, 0.5)],
-        center_offset: PixelCenterOffset::Index(0),
-    };
+impl<const S: usize> Multisampler<S> for StaticMultisampler<S> {
+    fn x_offsets(&self, _: u32, _: u32) -> [f32; S] {
+        self.x_offsets
+    }
+
+    fn y_offsets(&self) -> &[f32; S] {
+        &self.y_offsets
+    }
+
+    fn center_offset(&self) -> PixelCenterOffset {
+        self.center_offset
+    }
 }
 
-impl MultisampleState<4> {
-    pub const X4: Self = Self {
-        sample_offsets: [
-            glam::vec2(0.375, 0.125),
-            glam::vec2(0.625, 0.875),
-            glam::vec2(0.125, 0.625),
-            glam::vec2(0.875, 0.375),
-        ],
-        center_offset: PixelCenterOffset::Offset(glam::vec2(0.5, 0.5)),
-    };
+impl<const S: usize> StaticMultisampler<S> {
+    pub fn from_sample_pattern(pattern: &[[u8; S]; S]) -> Self {
+        let mut x_offsets = [0.0; S];
+        let mut y_offsets = [0.0; S];
+        let mut count = 0;
+        let step = 1.0 / S as f32;
+        let mut center_offset = PixelCenterOffset::Offset(glam::vec2(0.5, 0.5));
+
+        for x in 0..S {
+            for y in 0..S {
+                if pattern[x][y] == 1 {
+                    if count < S {
+                        x_offsets[count] = x as f32 * step + step * 0.5;
+                        y_offsets[count] = y as f32 * step + step * 0.5;
+                        if x == y && x == S / 2 {
+                            center_offset = PixelCenterOffset::Index(count);
+                        }
+                        count += 1;
+                    } else {
+                        panic!("number of samples in sample pattern not equal to map size");
+                    }
+                }
+            }
+        }
+
+        if count != S {
+            panic!("number of samples in sample pattern not equal to map size");
+        }
+
+        Self {
+            x_offsets,
+            y_offsets,
+            center_offset,
+        }
+    }
+}
+
+impl StaticMultisampler<1> {
+    pub fn single_sample() -> Self {
+        Self::from_sample_pattern(&[[1]])
+    }
+}
+
+impl StaticMultisampler<4> {
+    pub fn x4() -> Self {
+        #[rustfmt::skip]
+        let pattern = [
+            [0, 1, 0, 0],
+            [0, 0, 0, 1],
+            [1, 0, 0, 0],
+            [0, 0, 1, 0]
+        ];
+        Self::from_sample_pattern(&pattern)
+    }
+}
+
+impl StaticMultisampler<8> {
+    pub fn x8() -> Self {
+        Self::from_sample_pattern(&[
+            [0, 0, 0, 0, 0, 0, 0, 1],
+            [0, 0, 1, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 1, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 1, 0],
+            [0, 0, 0, 1, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 1, 0, 0],
+        ])
+    }
+}
+
+impl StaticMultisampler<16> {
+    pub fn x16() -> Self {
+        Self::from_sample_pattern(&[
+            [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+            [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+        ])
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct PipelineDescriptor<VS, SA, C, R, DF, FS, B, const S: usize> {
+pub struct StochasticMultisampler<const S: usize> {
+    offsets: [f32; S],
+}
+
+impl<const S: usize> StochasticMultisampler<S> {
+    pub fn new() -> Self {
+        let step = 1.0 / S as f32;
+        let mut offsets = [0.0; S];
+
+        for i in 0..S {
+            offsets[i] = i as f32 * step + step * 0.5;
+        }
+
+        Self { offsets }
+    }
+}
+
+impl<const S: usize> Multisampler<S> for StochasticMultisampler<S> {
+    fn x_offsets(&self, x: u32, y: u32) -> [f32; S] {
+        let mut rng = SmallRng::seed_from_u64(((x as u64) << 32) | y as u64);
+        let mut x_offsets = self.offsets;
+        x_offsets.shuffle(&mut rng);
+        x_offsets
+    }
+
+    fn y_offsets(&self) -> &[f32; S] {
+        &self.offsets
+    }
+
+    fn center_offset(&self) -> PixelCenterOffset {
+        PixelCenterOffset::Offset(glam::vec2(0.5, 0.5))
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct PipelineDescriptor<VS, SA, C, R, DF, FS, B, MS, const S: usize> {
     pub vertex_shader: VS,
     pub shape_assembler: SA,
     pub clipper: C,
@@ -338,11 +472,11 @@ pub struct PipelineDescriptor<VS, SA, C, R, DF, FS, B, const S: usize> {
     pub depth_state: Option<DepthState<DF>>,
     pub fragment_shader: FS,
     pub blend_function: B,
-    pub multisample_state: MultisampleState<S>,
+    pub multisampler: MS,
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct Pipeline<VS, SA, C, R, DF, FS, B, const A: usize, const V: usize, const S: usize> {
+pub struct Pipeline<VS, SA, C, R, DF, FS, B, MS, const A: usize, const V: usize, const S: usize> {
     vertex_shader: VS,
     shape_assembler: SA,
     clipper: C,
@@ -350,18 +484,19 @@ pub struct Pipeline<VS, SA, C, R, DF, FS, B, const A: usize, const V: usize, con
     depth_state: Option<DepthState<DF>>,
     fragment_shader: FS,
     blend_function: B,
-    multisample_state: MultisampleState<S>,
+    multisampler: MS,
 }
 
-impl<VS, SA, C, R, DF, FS, B, const A: usize, const V: usize, const S: usize>
-    Pipeline<VS, SA, C, R, DF, FS, B, A, V, S>
+impl<VS, SA, C, R, DF, FS, B, MS, const A: usize, const V: usize, const S: usize>
+    Pipeline<VS, SA, C, R, DF, FS, B, MS, A, V, S>
 where
     SA: ShapeAssembler<u32, V>,
     C: FnMut([FragmentInput<A>; V]) -> Vec<[FragmentInput<A>; V]>,
     R: Rasterizer<V, A, S>,
     DF: Fn(f32, f32) -> bool + Sync,
+    MS: Multisampler<S> + Sync,
 {
-    pub fn new(descriptor: PipelineDescriptor<VS, SA, C, R, DF, FS, B, S>) -> Self {
+    pub fn new(descriptor: PipelineDescriptor<VS, SA, C, R, DF, FS, B, MS, S>) -> Self {
         Self {
             vertex_shader: descriptor.vertex_shader,
             shape_assembler: descriptor.shape_assembler,
@@ -370,7 +505,7 @@ where
             depth_state: descriptor.depth_state,
             fragment_shader: descriptor.fragment_shader,
             blend_function: descriptor.blend_function,
-            multisample_state: descriptor.multisample_state,
+            multisampler: descriptor.multisampler,
         }
     }
 
@@ -408,8 +543,21 @@ where
             })
         };
 
-        // The unwrapped depth_buffer value will never be used if depth_buffer was none
-        let depth_buffer = unsafe { depth_buffer.unwrap_unchecked() };
+        let mut fragment_tools = FragmentTools {
+            uniforms,
+            fragment_shader: &self.fragment_shader,
+            blend_function: &self.blend_function,
+            render_buffer: render_buffer,
+        };
+
+        let mut depth_tools = if let Some(depth_state) = &self.depth_state {
+            Some(DepthTools {
+                depth_state,
+                depth_buffer: depth_buffer.unwrap(),
+            })
+        } else {
+            None
+        };
 
         self.rasterizer.set_screen_size(width, height);
         let shaded_vertices = vertex_buffer
@@ -425,23 +573,11 @@ where
             .flatten()
             .map(perspective_divide)
             .for_each(|shape| {
-                let mut fragment_tools = FragmentTools {
-                    uniforms,
-                    fragment_shader: &self.fragment_shader,
-                    blend_function: &self.blend_function,
-                    render_buffer: render_buffer,
-                };
-
-                let mut depth_tools = self.depth_state.as_mut().map(|depth_state| DepthTools {
-                    depth_state,
-                    depth_buffer,
-                });
-
                 self.rasterizer.rasterize(
                     shape,
                     &mut fragment_tools,
                     &mut depth_tools,
-                    &self.multisample_state,
+                    &self.multisampler,
                 );
             });
     }

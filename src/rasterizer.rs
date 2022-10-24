@@ -5,22 +5,23 @@ use std::ops::{Add, Mul};
 use glam::Vec4Swizzles;
 use rayon_core::{ThreadPool, ThreadPoolBuilder};
 
-use crate::{Buffer, DepthState, FragmentInput, MultisampleState, PixelCenterOffset};
+use crate::{Buffer, DepthState, FragmentInput, Multisampler, PixelCenterOffset};
 
 pub trait Rasterizer<const V: usize, const A: usize, const S: usize> {
     fn set_screen_size(&mut self, width: u32, height: u32);
-    fn rasterize<'a, 'b, U, T, DF, FS, B>(
+    fn rasterize<'a, 'b, U, T, DF, FS, B, MS>(
         &self,
         shape: [FragmentInput<A>; V],
-        fragment_tools: &'a mut FragmentTools<'a, U, T, FS, B, A, S>,
-        depth_tools: &'b mut Option<DepthTools<'b, DF, S>>,
-        multisample_state: &MultisampleState<S>,
+        fragment_tools: &mut FragmentTools<'a, U, T, FS, B, A, S>,
+        depth_tools: &mut Option<DepthTools<'b, DF, S>>,
+        multisampler: &MS,
     ) where
         U: Copy + Send,
         T: Copy + Default + Send,
         DF: Fn(f32, f32) -> bool + Sync,
         FS: Fn(FragmentInput<A>, U) -> T + Sync,
-        B: Fn(&T, &T) -> T + Sync;
+        B: Fn(&T, &T) -> T + Sync,
+        MS: Multisampler<S> + Sync;
 }
 
 pub struct FragmentTools<'a, U, T, FS, B, const A: usize, const S: usize> {
@@ -117,12 +118,12 @@ impl<const A: usize, const S: usize> Rasterizer<2, A, S> for BresenhamLineRaster
         self.height = height as i32;
     }
 
-    fn rasterize<U, T, DF, FS, B>(
+    fn rasterize<U, T, DF, FS, B, MS>(
         &self,
         shape: [FragmentInput<A>; 2],
         fragment_tools: &mut FragmentTools<U, T, FS, B, A, S>,
         depth_tools: &mut Option<DepthTools<DF, S>>,
-        _: &MultisampleState<S>,
+        _: &MS,
     ) where
         U: Copy,
         T: Copy + Default,
@@ -143,15 +144,15 @@ impl<const A: usize, const S: usize> Rasterizer<2, A, S> for BresenhamLineRaster
                 let z = zw[0];
                 if width_range.contains(&x) && height_range.contains(&y) && depth_range.contains(&z)
                 {
+                    let fragment_value = fragment_tools.shade_fragment(FragmentInput {
+                        position: glam::vec4(x as f32, y as f32, z, zw[1]),
+                        attributes,
+                    });
                     for sample in 0..(S as u32) {
                         if let Some(depth_tools) = depth_tools {
                             let depth_test_passed =
                                 depth_tools.compare(x as u32, y as u32, sample, z);
                             if depth_test_passed {
-                                let fragment_value = fragment_tools.shade_fragment(FragmentInput {
-                                    position: glam::vec4(x as f32, y as f32, z, zw[1]),
-                                    attributes,
-                                });
                                 fragment_tools.blend_and_write(
                                     x as u32,
                                     y as u32,
@@ -164,10 +165,6 @@ impl<const A: usize, const S: usize> Rasterizer<2, A, S> for BresenhamLineRaster
                                 }
                             }
                         } else {
-                            let fragment_value = fragment_tools.shade_fragment(FragmentInput {
-                                position: glam::vec4(x as f32, y as f32, z, zw[1]),
-                                attributes,
-                            });
                             fragment_tools.blend_and_write(
                                 x as u32,
                                 y as u32,
@@ -307,13 +304,78 @@ impl<const A: usize> Iterator for Interpolator<A> {
     }
 }
 
+#[derive(Debug)]
+pub struct AALineRasterizer {
+    width: f32,
+    rasterizer: EdgeFunctionTiledRasterizer,
+}
+
+impl AALineRasterizer {
+    pub fn new(width: f32) -> Self {
+        Self {
+            width,
+            rasterizer: EdgeFunctionTiledRasterizer::new(EdgeFunctionTiledRasterizerDescriptor {
+                cull_face: None,
+                tile_size: NonZeroU32::new(32).unwrap(),
+                thread_count: 0,
+            }),
+        }
+    }
+}
+
+impl<const A: usize, const S: usize> Rasterizer<2, A, S> for AALineRasterizer {
+    fn set_screen_size(&mut self, width: u32, height: u32) {
+        self.rasterizer.screen_bounds.max = glam::uvec2(width, height);
+    }
+
+    fn rasterize<'a, 'b, U, T, DF, FS, B, MS>(
+        &self,
+        shape: [FragmentInput<A>; 2],
+        fragment_tools: &mut FragmentTools<'a, U, T, FS, B, A, S>,
+        depth_tools: &mut Option<DepthTools<'b, DF, S>>,
+        multisampler: &MS,
+    ) where
+        U: Copy + Send,
+        T: Copy + Default + Send,
+        DF: Fn(f32, f32) -> bool + Sync,
+        FS: Fn(FragmentInput<A>, U) -> T + Sync,
+        B: Fn(&T, &T) -> T + Sync,
+        MS: Multisampler<S> + Sync,
+    {
+        let vector = (shape[1].position.xy() - shape[0].position.xy()).normalize();
+        let normal = glam::vec4(-vector.y, vector.x, 0.0, 0.0) * self.width * 0.5;
+
+        let a0 = FragmentInput {
+            position: shape[0].position + normal,
+            ..shape[0]
+        };
+        let a1 = FragmentInput {
+            position: shape[0].position - normal,
+            ..shape[0]
+        };
+        let b0 = FragmentInput {
+            position: shape[1].position + normal,
+            ..shape[1]
+        };
+        let b1 = FragmentInput {
+            position: shape[1].position - normal,
+            ..shape[1]
+        };
+
+        self.rasterizer
+            .rasterize([a0, a1, b0], fragment_tools, depth_tools, multisampler);
+        self.rasterizer
+            .rasterize([a1, b0, b1], fragment_tools, depth_tools, multisampler);
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Face {
     Cw,
     Ccw,
 }
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct EdgeFunctionRasterizer {
     screen_bounds: Bounds,
     cull_face: Option<Face>,
@@ -336,18 +398,19 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
         self.screen_bounds.max = glam::uvec2(width, height);
     }
 
-    fn rasterize<'a, 'b, U, T, DF, FS, B>(
+    fn rasterize<'a, 'b, U, T, DF, FS, B, MS>(
         &self,
         shape: [FragmentInput<A>; 3],
-        fragment_tools: &'a mut FragmentTools<'a, U, T, FS, B, A, S>,
-        depth_tools: &'b mut Option<DepthTools<'b, DF, S>>,
-        multisample_state: &MultisampleState<S>,
+        fragment_tools: &mut FragmentTools<'a, U, T, FS, B, A, S>,
+        depth_tools: &mut Option<DepthTools<'b, DF, S>>,
+        multisampler: &MS,
     ) where
         U: Copy + Send,
         T: Copy + Default + Send,
         DF: Fn(f32, f32) -> bool + Sync,
         FS: Fn(FragmentInput<A>, U) -> T + Sync,
         B: Fn(&T, &T) -> T + Sync,
+        MS: Multisampler<S> + Sync,
     {
         let area = calculate_area(&shape);
 
@@ -376,7 +439,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
             &shape,
             fragment_tools,
             depth_tools,
-            multisample_state,
+            multisampler,
             &mut samples,
             false,
         );
@@ -384,13 +447,13 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
 }
 
 #[derive(Debug)]
-pub struct EdgeFunctionRasterizerMT {
+pub struct EdgeFunctionMTRasterizer {
     screen_bounds: Bounds,
     cull_face: Option<Face>,
     thread_pool: ThreadPool,
 }
 
-impl EdgeFunctionRasterizerMT {
+impl EdgeFunctionMTRasterizer {
     pub fn new(cull_face: Option<Face>, thread_count: usize) -> Self {
         Self {
             screen_bounds: Bounds {
@@ -406,23 +469,24 @@ impl EdgeFunctionRasterizerMT {
     }
 }
 
-impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasterizerMT {
+impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionMTRasterizer {
     fn set_screen_size(&mut self, width: u32, height: u32) {
         self.screen_bounds.max = glam::uvec2(width, height);
     }
 
-    fn rasterize<'a, 'b, U, T, DF, FS, B>(
+    fn rasterize<'a, 'b, U, T, DF, FS, B, MS>(
         &self,
         shape: [FragmentInput<A>; 3],
-        fragment_tools: &'a mut FragmentTools<'a, U, T, FS, B, A, S>,
-        depth_tools: &'b mut Option<DepthTools<'b, DF, S>>,
-        multisample_state: &MultisampleState<S>,
+        fragment_tools: &mut FragmentTools<'a, U, T, FS, B, A, S>,
+        depth_tools: &mut Option<DepthTools<'b, DF, S>>,
+        multisampler: &MS,
     ) where
         U: Copy + Send,
         T: Copy + Default + Send,
         DF: Fn(f32, f32) -> bool + Sync,
         FS: Fn(FragmentInput<A>, U) -> T + Sync,
         B: Fn(&T, &T) -> T + Sync,
+        MS: Multisampler<S> + Sync,
     {
         let area = calculate_area(&shape);
 
@@ -453,7 +517,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
                         &shape,
                         fragment_tools,
                         depth_tools,
-                        multisample_state,
+                        multisampler,
                         &mut samples,
                         false,
                         y,
@@ -465,22 +529,22 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct EdgeFunctionRasterizerTiledDescriptor {
+pub struct EdgeFunctionTiledRasterizerDescriptor {
     pub cull_face: Option<Face>,
     pub tile_size: NonZeroU32,
     pub thread_count: u32,
 }
 
 #[derive(Debug)]
-pub struct EdgeFunctionRasterizerTiled {
+pub struct EdgeFunctionTiledRasterizer {
     screen_bounds: Bounds,
     cull_face: Option<Face>,
     tile_size: NonZeroU32,
     thread_pool: ThreadPool,
 }
 
-impl EdgeFunctionRasterizerTiled {
-    pub fn new(descriptor: EdgeFunctionRasterizerTiledDescriptor) -> Self {
+impl EdgeFunctionTiledRasterizer {
+    pub fn new(descriptor: EdgeFunctionTiledRasterizerDescriptor) -> Self {
         Self {
             screen_bounds: Bounds {
                 min: glam::uvec2(0, 0),
@@ -495,12 +559,12 @@ impl EdgeFunctionRasterizerTiled {
         }
     }
 
-    fn check_and_process<U, T, DF, FS, B, const A: usize, const S: usize>(
+    fn check_and_process<U, T, DF, FS, B, MS, const A: usize, const S: usize>(
         bounds: &Bounds,
         shape: &[FragmentInput<A>; 3],
         fragment_tools: &UnsafeFragmentTools<U, T, FS, B, A, S>,
         depth_tools: &UnsafeDepthTools<DF, S>,
-        multisample_state: &MultisampleState<S>,
+        multisampler: &MS,
         mut samples: [SampleData; S],
         lines: &[Line; 3],
         points: &[glam::Vec2; 3],
@@ -510,6 +574,7 @@ impl EdgeFunctionRasterizerTiled {
         DF: Fn(f32, f32) -> bool + Sync,
         FS: Fn(FragmentInput<A>, U) -> T + Sync,
         B: Fn(&T, &T) -> T + Sync,
+        MS: Multisampler<S>,
     {
         if bounds.intersect_or_contain(&lines, &points) {
             process_tile(
@@ -517,7 +582,7 @@ impl EdgeFunctionRasterizerTiled {
                 &shape,
                 fragment_tools,
                 depth_tools,
-                multisample_state,
+                multisampler,
                 &mut samples,
                 false,
             );
@@ -534,7 +599,7 @@ impl EdgeFunctionRasterizerTiled {
                     &shape,
                     fragment_tools,
                     depth_tools,
-                    multisample_state,
+                    multisampler,
                     &mut samples,
                     true,
                 );
@@ -543,23 +608,24 @@ impl EdgeFunctionRasterizerTiled {
     }
 }
 
-impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasterizerTiled {
+impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionTiledRasterizer {
     fn set_screen_size(&mut self, width: u32, height: u32) {
         self.screen_bounds.max = glam::uvec2(width, height);
     }
 
-    fn rasterize<'a, 'b, U, T, DF, FS, B>(
+    fn rasterize<'a, 'b, U, T, DF, FS, B, MS>(
         &self,
         shape: [FragmentInput<A>; 3],
-        fragment_tools: &'a mut FragmentTools<'a, U, T, FS, B, A, S>,
-        depth_tools: &'b mut Option<DepthTools<'b, DF, S>>,
-        multisample_state: &MultisampleState<S>,
+        fragment_tools: &mut FragmentTools<'a, U, T, FS, B, A, S>,
+        depth_tools: &mut Option<DepthTools<'b, DF, S>>,
+        multisampler: &MS,
     ) where
         U: Copy + Send,
         T: Copy + Default + Send,
         DF: Fn(f32, f32) -> bool + Sync,
         FS: Fn(FragmentInput<A>, U) -> T + Sync,
         B: Fn(&T, &T) -> T + Sync,
+        MS: Multisampler<S> + Sync,
     {
         let area = calculate_area(&shape);
 
@@ -609,7 +675,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
                             &shape,
                             fragment_tools,
                             depth_tools,
-                            multisample_state,
+                            multisampler,
                             samples,
                             &triangle_lines,
                             &triangle_points,
@@ -628,7 +694,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
                         &shape,
                         fragment_tools,
                         depth_tools,
-                        multisample_state,
+                        multisampler,
                         samples,
                         &triangle_lines,
                         &triangle_points,
@@ -648,7 +714,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
                         &shape,
                         fragment_tools,
                         depth_tools,
-                        multisample_state,
+                        multisampler,
                         samples,
                         &triangle_lines,
                         &triangle_points,
@@ -667,7 +733,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
                     &shape,
                     fragment_tools,
                     depth_tools,
-                    multisample_state,
+                    multisampler,
                     samples,
                     &triangle_lines,
                     &triangle_points,
@@ -914,12 +980,12 @@ fn prepare_static_data<const A: usize>(
     (w0, w1, w2)
 }
 
-fn process_tile<U, T, DF, FS, B, const A: usize, const S: usize>(
+fn process_tile<U, T, DF, FS, B, MS, const A: usize, const S: usize>(
     bounds: &Bounds,
     shape: &[FragmentInput<A>; 3],
     fragment_tools: &UnsafeFragmentTools<U, T, FS, B, A, S>,
     depth_tools: &UnsafeDepthTools<DF, S>,
-    multisample_state: &MultisampleState<S>,
+    multisampler: &MS,
     samples: &mut [SampleData; S],
     tile_covered: bool,
 ) where
@@ -928,6 +994,7 @@ fn process_tile<U, T, DF, FS, B, const A: usize, const S: usize>(
     DF: Fn(f32, f32) -> bool + Sync,
     FS: Fn(FragmentInput<A>, U) -> T + Sync,
     B: Fn(&T, &T) -> T + Sync,
+    MS: Multisampler<S>,
 {
     for y in bounds.min.y..bounds.max.y {
         process_row(
@@ -935,7 +1002,7 @@ fn process_tile<U, T, DF, FS, B, const A: usize, const S: usize>(
             shape,
             fragment_tools,
             depth_tools,
-            multisample_state,
+            multisampler,
             samples,
             tile_covered,
             y,
@@ -943,12 +1010,12 @@ fn process_tile<U, T, DF, FS, B, const A: usize, const S: usize>(
     }
 }
 
-fn process_row<U, T, DF, FS, B, const A: usize, const S: usize>(
+fn process_row<U, T, DF, FS, B, MS, const A: usize, const S: usize>(
     bounds: &Bounds,
     shape: &[FragmentInput<A>; 3],
     fragment_tools: &UnsafeFragmentTools<U, T, FS, B, A, S>,
     depth_tools: &UnsafeDepthTools<DF, S>,
-    multisample_state: &MultisampleState<S>,
+    multisampler: &MS,
     samples: &mut [SampleData; S],
     tile_covered: bool,
     y: u32,
@@ -958,18 +1025,23 @@ fn process_row<U, T, DF, FS, B, const A: usize, const S: usize>(
     DF: Fn(f32, f32) -> bool + Sync,
     FS: Fn(FragmentInput<A>, U) -> T + Sync,
     B: Fn(&T, &T) -> T + Sync,
+    MS: Multisampler<S>,
 {
+    let y_offsets = multisampler.y_offsets();
+
     for i in 0..S {
-        samples[i].compute_row_bary_coords(y as f32 + multisample_state.sample_offsets[i].y);
+        samples[i].compute_row_bary_coords(y as f32 + y_offsets[i]);
     }
 
     for x in bounds.min.x..bounds.max.x {
+        let ref x_offsets = multisampler.x_offsets(x, y);
+
         let mut covered_samples = [(0, 0.0); S];
         let mut covered_samples_len = 0;
 
         for i in 0..S {
             let sample = &mut samples[i];
-            sample.compute_barycentric_coords(x as f32 + multisample_state.sample_offsets[i].x);
+            sample.compute_barycentric_coords(x as f32 + x_offsets[i]);
 
             if tile_covered || sample.is_in_triangle() {
                 let depth = sample.interpolate(
@@ -995,17 +1067,13 @@ fn process_row<U, T, DF, FS, B, const A: usize, const S: usize>(
         }
 
         if covered_samples_len != 0 {
-            let (ref fragment_sample, xy) = match multisample_state.center_offset {
+            let (ref fragment_sample, xy) = match multisampler.center_offset() {
                 PixelCenterOffset::Index(i) => {
-                    let xy = glam::vec2(x as f32, y as f32) + multisample_state.sample_offsets[i];
+                    let xy = glam::vec2(x as f32 + x_offsets[i], y as f32 + y_offsets[i]);
                     (samples[i], xy)
                 }
                 PixelCenterOffset::Offset(offset) => {
-                    let mut fragment_sample = SampleData {
-                        w0: BarycentricCoordinate::new(&samples[0].w0.static_data),
-                        w1: BarycentricCoordinate::new(&samples[0].w1.static_data),
-                        w2: BarycentricCoordinate::new(&samples[0].w2.static_data),
-                    };
+                    let mut fragment_sample = samples[0];
                     let xy = glam::vec2(x as f32, y as f32) + offset;
                     fragment_sample.compute_row_bary_coords(xy.y);
                     fragment_sample.compute_barycentric_coords(xy.x);
@@ -1037,7 +1105,9 @@ fn process_row<U, T, DF, FS, B, const A: usize, const S: usize>(
                 unsafe {
                     let (sample, depth) = *covered_samples.get_unchecked(i);
                     if let Some(ref mut depth_tools) = *depth_tools.0 {
-                        depth_tools.write(x, y, sample, depth);
+                        if depth_tools.depth_state.write_depth {
+                            depth_tools.write(x, y, sample, depth);
+                        }
                     }
                     (*fragment_tools.0).blend_and_write(x, y, sample, &fragment_value);
                 }

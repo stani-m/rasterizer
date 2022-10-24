@@ -22,7 +22,7 @@ pub struct WgpuPresenter<'a> {
 }
 
 impl<'a> WgpuPresenter<'a> {
-    pub fn new<W>(window: &'a W, width: u32, height: u32, vsync: bool) -> Self
+    pub fn new<W>(window: &W, width: u32, height: u32, vsync: bool) -> Self
     where
         W: raw_window_handle::HasRawWindowHandle,
     {

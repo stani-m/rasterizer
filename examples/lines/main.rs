@@ -11,7 +11,7 @@ use rasterizer::presenter::WgpuPresenter;
 use rasterizer::rasterizer::BresenhamLineRasterizer;
 use rasterizer::{
     blend_function, clipper, depth_function, Buffer, Color, DepthState, FragmentInput,
-    ListShapeAssembler, MultisampleState, Pipeline, PipelineDescriptor,
+    ListShapeAssembler, Pipeline, PipelineDescriptor, StaticMultisampler,
 };
 
 #[path = "../model.rs"]
@@ -47,7 +47,7 @@ fn main() {
         }),
         fragment_shader: |_, (_, color)| color,
         blend_function: blend_function::replace,
-        multisample_state: MultisampleState::SINGLE_SAMPLE,
+        multisampler: StaticMultisampler::single_sample(),
     });
 
     let (document, buffers, _) = gltf::import("examples/assets/TheDonut.gltf")

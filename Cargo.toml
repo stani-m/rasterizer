@@ -16,6 +16,7 @@ pollster = { version = "0.2.5", optional = true }
 raw-window-handle = { version = "0.4.3", optional = true }
 bytemuck = { version = "1.10.0", features = ["derive", "min_const_generics"] }
 rayon-core = "1.9.3"
+rand = { version = "0.8.5", features = ["small_rng"] }
 
 [features]
 wgpu_presenter = ["wgpu", "pollster", "raw-window-handle"]
@@ -26,6 +27,10 @@ required-features = ["wgpu_presenter"]
 
 [[example]]
 name = "triangles"
+required-features = ["wgpu_presenter"]
+
+[[example]]
+name = "stochastic-aa"
 required-features = ["wgpu_presenter"]
 
 [dev-dependencies]

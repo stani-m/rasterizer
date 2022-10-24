@@ -10,11 +10,11 @@ use winit::window::WindowBuilder;
 use model::Model;
 use rasterizer::presenter::WgpuPresenter;
 use rasterizer::rasterizer::{
-    EdgeFunctionRasterizerTiled, EdgeFunctionRasterizerTiledDescriptor, Face,
+    EdgeFunctionTiledRasterizer, EdgeFunctionTiledRasterizerDescriptor, Face,
 };
 use rasterizer::{
     blend_function, clipper, depth_function, Buffer, Color, DepthState, FragmentInput,
-    ListShapeAssembler, MultisampleState, Pipeline, PipelineDescriptor,
+    ListShapeAssembler, Pipeline, PipelineDescriptor, StaticMultisampler,
 };
 
 #[path = "../model.rs"]
@@ -43,7 +43,7 @@ fn main() {
         },
         shape_assembler: ListShapeAssembler::new(),
         clipper: clipper::simple,
-        rasterizer: EdgeFunctionRasterizerTiled::new(EdgeFunctionRasterizerTiledDescriptor {
+        rasterizer: EdgeFunctionTiledRasterizer::new(EdgeFunctionTiledRasterizerDescriptor {
             cull_face: Some(Face::Ccw),
             tile_size: NonZeroU32::new(32).unwrap(),
             thread_count: 0,
@@ -62,7 +62,7 @@ fn main() {
             }
         },
         blend_function: blend_function::replace,
-        multisample_state: MultisampleState::X4,
+        multisampler: StaticMultisampler::x4(),
     });
 
     let (document, buffers, _) = gltf::import("examples/assets/Cube.gltf")
