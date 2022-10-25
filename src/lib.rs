@@ -301,23 +301,15 @@ pub mod blend_function {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-pub enum PixelCenterOffset {
-    Index(usize),
-    Offset(glam::Vec2),
-}
-
 pub trait Multisampler<const S: usize> {
     fn x_offsets(&self, x: u32, y: u32) -> [f32; S];
     fn y_offsets(&self) -> &[f32; S];
-    fn center_offset(&self) -> PixelCenterOffset;
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct StaticMultisampler<const S: usize> {
     pub x_offsets: [f32; S],
     pub y_offsets: [f32; S],
-    pub center_offset: PixelCenterOffset,
 }
 
 impl<const S: usize> Multisampler<S> for StaticMultisampler<S> {
@@ -328,10 +320,6 @@ impl<const S: usize> Multisampler<S> for StaticMultisampler<S> {
     fn y_offsets(&self) -> &[f32; S] {
         &self.y_offsets
     }
-
-    fn center_offset(&self) -> PixelCenterOffset {
-        self.center_offset
-    }
 }
 
 impl<const S: usize> StaticMultisampler<S> {
@@ -340,7 +328,6 @@ impl<const S: usize> StaticMultisampler<S> {
         let mut y_offsets = [0.0; S];
         let mut count = 0;
         let step = 1.0 / S as f32;
-        let mut center_offset = PixelCenterOffset::Offset(glam::vec2(0.5, 0.5));
 
         for x in 0..S {
             for y in 0..S {
@@ -348,9 +335,6 @@ impl<const S: usize> StaticMultisampler<S> {
                     if count < S {
                         x_offsets[count] = x as f32 * step + step * 0.5;
                         y_offsets[count] = y as f32 * step + step * 0.5;
-                        if x == y && x == S / 2 {
-                            center_offset = PixelCenterOffset::Index(count);
-                        }
                         count += 1;
                     } else {
                         panic!("number of samples in sample pattern not equal to map size");
@@ -366,7 +350,6 @@ impl<const S: usize> StaticMultisampler<S> {
         Self {
             x_offsets,
             y_offsets,
-            center_offset,
         }
     }
 }
@@ -456,10 +439,6 @@ impl<const S: usize> Multisampler<S> for StochasticMultisampler<S> {
 
     fn y_offsets(&self) -> &[f32; S] {
         &self.offsets
-    }
-
-    fn center_offset(&self) -> PixelCenterOffset {
-        PixelCenterOffset::Offset(glam::vec2(0.5, 0.5))
     }
 }
 

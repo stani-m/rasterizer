@@ -5,7 +5,7 @@ use std::ops::{Add, Mul};
 use glam::Vec4Swizzles;
 use rayon_core::{ThreadPool, ThreadPoolBuilder};
 
-use crate::{Buffer, DepthState, FragmentInput, Multisampler, PixelCenterOffset};
+use crate::{Buffer, DepthState, FragmentInput, Multisampler};
 
 pub trait Rasterizer<const V: usize, const A: usize, const S: usize> {
     fn set_screen_size(&mut self, width: u32, height: u32);
@@ -1038,6 +1038,7 @@ fn process_row<U, T, DF, FS, B, MS, const A: usize, const S: usize>(
 
         let mut covered_samples = [(0, 0.0); S];
         let mut covered_samples_len = 0;
+        let mut pixel_center_offset = glam::vec2(0.0, 0.0);
 
         for i in 0..S {
             let sample = &mut samples[i];
@@ -1061,25 +1062,18 @@ fn process_row<U, T, DF, FS, B, MS, const A: usize, const S: usize>(
                                 (i as u32, depth);
                         }
                         covered_samples_len += 1;
+                        pixel_center_offset += glam::vec2(x_offsets[i], y_offsets[i]);
                     }
                 }
             }
         }
 
         if covered_samples_len != 0 {
-            let (ref fragment_sample, xy) = match multisampler.center_offset() {
-                PixelCenterOffset::Index(i) => {
-                    let xy = glam::vec2(x as f32 + x_offsets[i], y as f32 + y_offsets[i]);
-                    (samples[i], xy)
-                }
-                PixelCenterOffset::Offset(offset) => {
-                    let mut fragment_sample = samples[0];
-                    let xy = glam::vec2(x as f32, y as f32) + offset;
-                    fragment_sample.compute_row_bary_coords(xy.y);
-                    fragment_sample.compute_barycentric_coords(xy.x);
-                    (fragment_sample, xy)
-                }
-            };
+            let mut fragment_sample = samples[0];
+            let xy = glam::vec2(x as f32, y as f32) + pixel_center_offset / covered_samples_len as f32;
+            fragment_sample.compute_row_bary_coords(xy.y);
+            fragment_sample.compute_barycentric_coords(xy.x);
+
             let zw = fragment_sample.interpolate(
                 shape[0].position.zw(),
                 shape[1].position.zw(),
