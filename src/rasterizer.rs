@@ -1,6 +1,6 @@
 use std::mem;
 use std::num::NonZeroU32;
-use std::ops::{Add, Mul};
+use std::ops::{Add, Mul, Range};
 
 use glam::Vec4Swizzles;
 use rayon_core::{ThreadPool, ThreadPoolBuilder};
@@ -120,7 +120,7 @@ impl<const A: usize, const S: usize> Rasterizer<2, A, S> for BresenhamLineRaster
 
     fn rasterize<U, T, DF, FS, B, MS>(
         &self,
-        shape: [FragmentInput<A>; 2],
+        line: [FragmentInput<A>; 2],
         fragment_tools: &mut FragmentTools<U, T, FS, B, A, S>,
         depth_tools: &mut Option<DepthTools<DF, S>>,
         _: &MS,
@@ -131,7 +131,7 @@ impl<const A: usize, const S: usize> Rasterizer<2, A, S> for BresenhamLineRaster
         FS: Fn(FragmentInput<A>, U) -> T,
         B: Fn(&T, &T) -> T,
     {
-        let [mut from, mut to] = shape;
+        let [mut from, mut to] = line;
         let [mut x0, mut y0] = from.position.xy().round().as_ivec2().to_array();
         let [mut x1, mut y1] = to.position.xy().round().as_ivec2().to_array();
         let mut run = x1 - x0;
@@ -306,31 +306,30 @@ impl<const A: usize> Iterator for Interpolator<A> {
 
 #[derive(Debug)]
 pub struct AALineRasterizer {
+    screen_bounds: Bounds,
     width: f32,
-    rasterizer: EdgeFunctionTiledRasterizer,
 }
 
 impl AALineRasterizer {
     pub fn new(width: f32) -> Self {
         Self {
+            screen_bounds: Bounds {
+                min: glam::uvec2(0, 0),
+                max: glam::uvec2(0, 0),
+            },
             width,
-            rasterizer: EdgeFunctionTiledRasterizer::new(EdgeFunctionTiledRasterizerDescriptor {
-                cull_face: None,
-                tile_size: NonZeroU32::new(32).unwrap(),
-                thread_count: 0,
-            }),
         }
     }
 }
 
 impl<const A: usize, const S: usize> Rasterizer<2, A, S> for AALineRasterizer {
     fn set_screen_size(&mut self, width: u32, height: u32) {
-        self.rasterizer.screen_bounds.max = glam::uvec2(width, height);
+        self.screen_bounds.max = glam::uvec2(width, height);
     }
 
     fn rasterize<'a, 'b, U, T, DF, FS, B, MS>(
         &self,
-        shape: [FragmentInput<A>; 2],
+        line: [FragmentInput<A>; 2],
         fragment_tools: &mut FragmentTools<'a, U, T, FS, B, A, S>,
         depth_tools: &mut Option<DepthTools<'b, DF, S>>,
         multisampler: &MS,
@@ -342,30 +341,120 @@ impl<const A: usize, const S: usize> Rasterizer<2, A, S> for AALineRasterizer {
         B: Fn(&T, &T) -> T + Sync,
         MS: Multisampler<S> + Sync,
     {
-        let vector = (shape[1].position.xy() - shape[0].position.xy()).normalize();
+        let vector = (line[1].position.xy() - line[0].position.xy()).normalize();
         let normal = glam::vec4(-vector.y, vector.x, 0.0, 0.0) * self.width * 0.5;
 
         let a0 = FragmentInput {
-            position: shape[0].position + normal,
-            ..shape[0]
+            position: line[0].position + normal,
+            ..line[0]
         };
         let a1 = FragmentInput {
-            position: shape[0].position - normal,
-            ..shape[0]
+            position: line[0].position - normal,
+            ..line[0]
         };
         let b0 = FragmentInput {
-            position: shape[1].position + normal,
-            ..shape[1]
+            position: line[1].position + normal,
+            ..line[1]
         };
         let b1 = FragmentInput {
-            position: shape[1].position - normal,
-            ..shape[1]
+            position: line[1].position - normal,
+            ..line[1]
         };
 
-        self.rasterizer
-            .rasterize([a0, a1, b0], fragment_tools, depth_tools, multisampler);
-        self.rasterizer
-            .rasterize([a1, b0, b1], fragment_tools, depth_tools, multisampler);
+        let triangles = [[a0, a1, b0], [a1, b0, b1]];
+
+        let area = calculate_area(&triangles[0]);
+
+        let inv_area = -1.0 / area;
+
+        let bounds = Bounds::from(&[a0, a1, b0, b1]).intersection(self.screen_bounds);
+
+        let u = prepare_static_data(&triangles[0], inv_area);
+        let w = prepare_static_data(&triangles[1], -inv_area);
+
+        let mut samples = [prepare_samples(&u), prepare_samples(&w)];
+
+        let fragment_tools = &UnsafeFragmentTools(fragment_tools);
+        let depth_tools = &UnsafeDepthTools(depth_tools);
+
+        let [mut from, mut to] = line.map(|vertex| vertex.position.xy().round().as_ivec2());
+        let run = to.x - from.x;
+        let rise = to.y - from.y;
+
+        if run == 0 || rise == 0 {
+            process_tile(
+                &bounds,
+                &triangles,
+                fragment_tools,
+                depth_tools,
+                multisampler,
+                &mut samples,
+                false,
+            );
+        } else {
+            let slope = rise as f32 / run as f32;
+            let adjust = if slope >= 0.0 { 1 } else { -1 };
+            let mut offset = 0;
+            if slope < 1.0 && slope > -1.0 {
+                let delta = rise.abs() * 2;
+                let mut threshold = run.abs();
+                let threshold_inc = threshold * 2;
+                if from.x > to.x {
+                    mem::swap(&mut from, &mut to)
+                }
+                let mut y = from.y;
+                for x in from.x..to.x {
+                    let segment = Bounds {
+                        min: glam::uvec2(x as u32, (y - 1) as u32),
+                        max: glam::uvec2(x as u32 + 1, y as u32 + 2),
+                    }
+                    .intersection(bounds);
+                    process_tile(
+                        &segment,
+                        &triangles,
+                        fragment_tools,
+                        depth_tools,
+                        multisampler,
+                        &mut samples,
+                        false,
+                    );
+                    offset += delta;
+                    if offset >= threshold {
+                        y += adjust;
+                        threshold += threshold_inc;
+                    }
+                }
+            } else {
+                let delta = run.abs() * 2;
+                let mut threshold = rise.abs();
+                let threshold_inc = threshold * 2;
+                if from.y > to.y {
+                    mem::swap(&mut from, &mut to)
+                }
+                let mut x = from.x;
+                for y in from.y..to.y {
+                    if (bounds.min.y..bounds.max.y).contains(&(y as u32)) {
+                        let x_min = ((x - 1) as u32).clamp(bounds.min.x, bounds.max.x);
+                        let x_max = (x as u32 + 2).clamp(bounds.min.x, bounds.max.x);
+                        process_row(
+                            x_min..x_max,
+                            &triangles,
+                            fragment_tools,
+                            depth_tools,
+                            multisampler,
+                            &mut samples,
+                            false,
+                            y as u32,
+                        );
+                    }
+                    offset += delta;
+                    if offset >= threshold {
+                        x += adjust;
+                        threshold += threshold_inc;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -400,7 +489,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
 
     fn rasterize<'a, 'b, U, T, DF, FS, B, MS>(
         &self,
-        shape: [FragmentInput<A>; 3],
+        triangle: [FragmentInput<A>; 3],
         fragment_tools: &mut FragmentTools<'a, U, T, FS, B, A, S>,
         depth_tools: &mut Option<DepthTools<'b, DF, S>>,
         multisampler: &MS,
@@ -412,7 +501,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
         B: Fn(&T, &T) -> T + Sync,
         MS: Multisampler<S> + Sync,
     {
-        let area = calculate_area(&shape);
+        let area = calculate_area(&triangle);
 
         if skip_triangle(area, self.cull_face) {
             return;
@@ -420,23 +509,21 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
 
         let inv_area = -1.0 / area;
 
-        let bounds = Bounds::from(&shape).clamp(self.screen_bounds);
+        let bounds = Bounds::from(&triangle).intersection(self.screen_bounds);
 
-        let (w0, w1, w2) = prepare_static_data(&shape, inv_area);
+        let w = prepare_static_data(&triangle, inv_area);
 
-        let mut samples = [SampleData {
-            w0: BarycentricCoordinate::new(&w0),
-            w1: BarycentricCoordinate::new(&w1),
-            w2: BarycentricCoordinate::new(&w2),
-        }; S];
+        let mut samples = [prepare_samples(&w)];
 
         // DepthTools and FragmentTools don't need to be unsafe here but it makes code reuse much easier
-        let fragment_tools = &UnsafeFragmentTools(fragment_tools as *mut _);
-        let depth_tools = &UnsafeDepthTools(depth_tools as *mut _);
+        let fragment_tools = &UnsafeFragmentTools(fragment_tools);
+        let depth_tools = &UnsafeDepthTools(depth_tools);
+
+        let triangles = [triangle];
 
         process_tile(
             &bounds,
-            &shape,
+            &triangles,
             fragment_tools,
             depth_tools,
             multisampler,
@@ -476,7 +563,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionMTRaste
 
     fn rasterize<'a, 'b, U, T, DF, FS, B, MS>(
         &self,
-        shape: [FragmentInput<A>; 3],
+        triangle: [FragmentInput<A>; 3],
         fragment_tools: &mut FragmentTools<'a, U, T, FS, B, A, S>,
         depth_tools: &mut Option<DepthTools<'b, DF, S>>,
         multisampler: &MS,
@@ -488,7 +575,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionMTRaste
         B: Fn(&T, &T) -> T + Sync,
         MS: Multisampler<S> + Sync,
     {
-        let area = calculate_area(&shape);
+        let area = calculate_area(&triangle);
 
         if skip_triangle(area, self.cull_face) {
             return;
@@ -496,25 +583,23 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionMTRaste
 
         let inv_area = -1.0 / area;
 
-        let bounds = Bounds::from(&shape).clamp(self.screen_bounds);
+        let bounds = Bounds::from(&triangle).intersection(self.screen_bounds);
 
-        let (w0, w1, w2) = prepare_static_data(&shape, inv_area);
+        let w = prepare_static_data(&triangle, inv_area);
 
-        let mut samples = [SampleData {
-            w0: BarycentricCoordinate::new(&w0),
-            w1: BarycentricCoordinate::new(&w1),
-            w2: BarycentricCoordinate::new(&w2),
-        }; S];
+        let mut samples = [prepare_samples(&w)];
 
-        let fragment_tools = &UnsafeFragmentTools(fragment_tools as *mut _);
-        let depth_tools = &UnsafeDepthTools(depth_tools as *mut _);
+        let fragment_tools = &UnsafeFragmentTools(fragment_tools);
+        let depth_tools = &UnsafeDepthTools(depth_tools);
+
+        let triangles = [triangle];
 
         self.thread_pool.in_place_scope(|scope| {
             for y in bounds.min.y..bounds.max.y {
                 scope.spawn(move |_| {
                     process_row(
-                        &bounds,
-                        &shape,
+                        bounds.min.x..bounds.max.x,
+                        &triangles,
                         fragment_tools,
                         depth_tools,
                         multisampler,
@@ -532,7 +617,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionMTRaste
 pub struct EdgeFunctionTiledRasterizerDescriptor {
     pub cull_face: Option<Face>,
     pub tile_size: NonZeroU32,
-    pub thread_count: u32,
+    pub thread_count: usize,
 }
 
 #[derive(Debug)]
@@ -553,7 +638,7 @@ impl EdgeFunctionTiledRasterizer {
             cull_face: descriptor.cull_face,
             tile_size: descriptor.tile_size,
             thread_pool: ThreadPoolBuilder::new()
-                .num_threads(descriptor.thread_count as usize)
+                .num_threads(descriptor.thread_count)
                 .build()
                 .unwrap(),
         }
@@ -561,11 +646,11 @@ impl EdgeFunctionTiledRasterizer {
 
     fn check_and_process<U, T, DF, FS, B, MS, const A: usize, const S: usize>(
         bounds: &Bounds,
-        shape: &[FragmentInput<A>; 3],
+        triangles: &[[FragmentInput<A>; 3]; 1],
         fragment_tools: &UnsafeFragmentTools<U, T, FS, B, A, S>,
         depth_tools: &UnsafeDepthTools<DF, S>,
         multisampler: &MS,
-        mut samples: [SampleData; S],
+        samples: &mut [[SampleData; S]; 1],
         lines: &[Line; 3],
         points: &[glam::Vec2; 3],
     ) where
@@ -579,15 +664,15 @@ impl EdgeFunctionTiledRasterizer {
         if bounds.intersect_or_contain(&lines, &points) {
             process_tile(
                 &bounds,
-                &shape,
+                &triangles,
                 fragment_tools,
                 depth_tools,
                 multisampler,
-                &mut samples,
+                samples,
                 false,
             );
         } else {
-            let mut sample = samples[0];
+            let mut sample = samples[0][0];
 
             let middle = bounds.middle();
             sample.compute_row_bary_coords(middle.y);
@@ -596,11 +681,11 @@ impl EdgeFunctionTiledRasterizer {
             if sample.is_in_triangle() {
                 process_tile(
                     &bounds,
-                    &shape,
+                    &triangles,
                     fragment_tools,
                     depth_tools,
                     multisampler,
-                    &mut samples,
+                    samples,
                     true,
                 );
             }
@@ -615,7 +700,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionTiledRa
 
     fn rasterize<'a, 'b, U, T, DF, FS, B, MS>(
         &self,
-        shape: [FragmentInput<A>; 3],
+        triangle: [FragmentInput<A>; 3],
         fragment_tools: &mut FragmentTools<'a, U, T, FS, B, A, S>,
         depth_tools: &mut Option<DepthTools<'b, DF, S>>,
         multisampler: &MS,
@@ -627,7 +712,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionTiledRa
         B: Fn(&T, &T) -> T + Sync,
         MS: Multisampler<S> + Sync,
     {
-        let area = calculate_area(&shape);
+        let area = calculate_area(&triangle);
 
         if skip_triangle(area, self.cull_face) {
             return;
@@ -635,30 +720,28 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionTiledRa
 
         let inv_area = -1.0 / area;
 
-        let bounds = Bounds::from(&shape).clamp(self.screen_bounds);
+        let bounds = Bounds::from(&triangle).intersection(self.screen_bounds);
         let max_tile = bounds.max - (bounds.max - bounds.min) % self.tile_size.get();
 
-        let (w0, w1, w2) = prepare_static_data(&shape, inv_area);
+        let w = prepare_static_data(&triangle, inv_area);
 
-        let samples = [SampleData {
-            w0: BarycentricCoordinate::new(&w0),
-            w1: BarycentricCoordinate::new(&w1),
-            w2: BarycentricCoordinate::new(&w2),
-        }; S];
+        let mut samples = [prepare_samples(&w)];
 
         let triangle_lines = [
-            Line::new(shape[0].position.xy(), shape[1].position.xy()),
-            Line::new(shape[1].position.xy(), shape[2].position.xy()),
-            Line::new(shape[2].position.xy(), shape[0].position.xy()),
+            Line::new(triangle[0].position.xy(), triangle[1].position.xy()),
+            Line::new(triangle[1].position.xy(), triangle[2].position.xy()),
+            Line::new(triangle[2].position.xy(), triangle[0].position.xy()),
         ];
         let triangle_points = [
-            shape[0].position.xy(),
-            shape[1].position.xy(),
-            shape[2].position.xy(),
+            triangle[0].position.xy(),
+            triangle[1].position.xy(),
+            triangle[2].position.xy(),
         ];
 
-        let fragment_tools = &UnsafeFragmentTools(fragment_tools as *mut _);
-        let depth_tools = &UnsafeDepthTools(depth_tools as *mut _);
+        let fragment_tools = &UnsafeFragmentTools(fragment_tools);
+        let depth_tools = &UnsafeDepthTools(depth_tools);
+
+        let triangles = [triangle];
 
         self.thread_pool.in_place_scope(|scope| {
             for y_min in (bounds.min.y..max_tile.y).step_by(self.tile_size.get() as usize) {
@@ -672,11 +755,11 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionTiledRa
                     scope.spawn(move |_| {
                         Self::check_and_process(
                             &tile_bounds,
-                            &shape,
+                            &triangles,
                             fragment_tools,
                             depth_tools,
                             multisampler,
-                            samples,
+                            &mut samples,
                             &triangle_lines,
                             &triangle_points,
                         )
@@ -691,11 +774,11 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionTiledRa
                 scope.spawn(move |_| {
                     Self::check_and_process(
                         &tile_bounds,
-                        &shape,
+                        &triangles,
                         fragment_tools,
                         depth_tools,
                         multisampler,
-                        samples,
+                        &mut samples,
                         &triangle_lines,
                         &triangle_points,
                     )
@@ -711,11 +794,11 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionTiledRa
                 scope.spawn(move |_| {
                     Self::check_and_process(
                         &tile_bounds,
-                        &shape,
+                        &triangles,
                         fragment_tools,
                         depth_tools,
                         multisampler,
-                        samples,
+                        &mut samples,
                         &triangle_lines,
                         &triangle_points,
                     )
@@ -730,11 +813,11 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionTiledRa
             scope.spawn(move |_| {
                 Self::check_and_process(
                     &tile_bounds,
-                    &shape,
+                    &triangles,
                     fragment_tools,
                     depth_tools,
                     multisampler,
-                    samples,
+                    &mut samples,
                     &triangle_lines,
                     &triangle_points,
                 )
@@ -779,7 +862,7 @@ impl Bounds {
         (self.min.as_vec2() + self.max.as_vec2()) * 0.5
     }
 
-    fn clamp(self, other: Self) -> Self {
+    fn intersection(self, other: Self) -> Self {
         Bounds {
             min: self.min.max(other.min),
             max: self.max.min(other.max),
@@ -920,9 +1003,9 @@ impl<'a> SampleData<'a> {
     }
 }
 
-fn calculate_area<const A: usize>(shape: &[FragmentInput<A>; 3]) -> f32 {
-    let a = shape[0].position.xy() - shape[1].position.xy();
-    let b = shape[2].position.xy() - shape[1].position.xy();
+fn calculate_area<const A: usize>(triangle: &[FragmentInput<A>; 3]) -> f32 {
+    let a = triangle[0].position.xy() - triangle[1].position.xy();
+    let b = triangle[2].position.xy() - triangle[1].position.xy();
     a.x * b.y - a.y * b.x
 }
 
@@ -940,26 +1023,26 @@ fn skip_triangle(area: f32, cull_face: Option<Face>) -> bool {
 }
 
 fn prepare_static_data<const A: usize>(
-    shape: &[FragmentInput<A>; 3],
+    triangle: &[FragmentInput<A>; 3],
     inv_area: f32,
 ) -> (StaticData, StaticData, StaticData) {
-    let w0_base = (shape[1].position.x * shape[2].position.y
-        - shape[1].position.y * shape[2].position.x)
+    let w0_base = (triangle[1].position.x * triangle[2].position.y
+        - triangle[1].position.y * triangle[2].position.x)
         * inv_area;
-    let w1_base = (shape[2].position.x * shape[0].position.y
-        - shape[2].position.y * shape[0].position.x)
+    let w1_base = (triangle[2].position.x * triangle[0].position.y
+        - triangle[2].position.y * triangle[0].position.x)
         * inv_area;
-    let w2_base = (shape[0].position.x * shape[1].position.y
-        - shape[0].position.y * shape[1].position.x)
+    let w2_base = (triangle[0].position.x * triangle[1].position.y
+        - triangle[0].position.y * triangle[1].position.x)
         * inv_area;
 
-    let w0_x_delta = (shape[1].position.y - shape[2].position.y) * inv_area;
-    let w1_x_delta = (shape[2].position.y - shape[0].position.y) * inv_area;
-    let w2_x_delta = (shape[0].position.y - shape[1].position.y) * inv_area;
+    let w0_x_delta = (triangle[1].position.y - triangle[2].position.y) * inv_area;
+    let w1_x_delta = (triangle[2].position.y - triangle[0].position.y) * inv_area;
+    let w2_x_delta = (triangle[0].position.y - triangle[1].position.y) * inv_area;
 
-    let w0_y_delta = (shape[2].position.x - shape[1].position.x) * inv_area;
-    let w1_y_delta = (shape[0].position.x - shape[2].position.x) * inv_area;
-    let w2_y_delta = (shape[1].position.x - shape[0].position.x) * inv_area;
+    let w0_y_delta = (triangle[2].position.x - triangle[1].position.x) * inv_area;
+    let w1_y_delta = (triangle[0].position.x - triangle[2].position.x) * inv_area;
+    let w2_y_delta = (triangle[1].position.x - triangle[0].position.x) * inv_area;
 
     let w0 = StaticData {
         base: w0_base,
@@ -980,13 +1063,63 @@ fn prepare_static_data<const A: usize>(
     (w0, w1, w2)
 }
 
-fn process_tile<U, T, DF, FS, B, MS, const A: usize, const S: usize>(
+fn prepare_samples<const S: usize>(w: &(StaticData, StaticData, StaticData)) -> [SampleData; S] {
+    [SampleData {
+        w0: BarycentricCoordinate::new(&w.0),
+        w1: BarycentricCoordinate::new(&w.1),
+        w2: BarycentricCoordinate::new(&w.2),
+    }; S]
+}
+
+#[derive(Copy, Clone, Debug)]
+struct PixelCoverage<const S: usize> {
+    covered_samples: [(u32, f32); S],
+    covered_samples_count: usize,
+    center_offset: glam::Vec2,
+}
+
+impl<const S: usize> PixelCoverage<S> {
+    unsafe fn push(&mut self, sample_index: u32, depth: f32) {
+        *self
+            .covered_samples
+            .get_unchecked_mut(self.covered_samples_count) = (sample_index, depth);
+        self.covered_samples_count += 1;
+    }
+
+    unsafe fn get_coverage_at(&self, index: usize) -> (u32, f32) {
+        *self.covered_samples.get_unchecked(index)
+    }
+
+    fn add_offset(&mut self, offset: glam::Vec2) {
+        self.center_offset += offset;
+    }
+
+    fn center_offset(&self) -> glam::Vec2 {
+        self.center_offset / self.covered_samples_count as f32
+    }
+
+    fn count(&self) -> usize {
+        self.covered_samples_count
+    }
+}
+
+impl<const S: usize> Default for PixelCoverage<S> {
+    fn default() -> Self {
+        Self {
+            covered_samples: [(0, 0.0); S],
+            covered_samples_count: 0,
+            center_offset: glam::Vec2::ZERO,
+        }
+    }
+}
+
+fn process_tile<U, T, DF, FS, B, MS, const A: usize, const S: usize, const TR: usize>(
     bounds: &Bounds,
-    shape: &[FragmentInput<A>; 3],
+    triangles: &[[FragmentInput<A>; 3]; TR],
     fragment_tools: &UnsafeFragmentTools<U, T, FS, B, A, S>,
     depth_tools: &UnsafeDepthTools<DF, S>,
     multisampler: &MS,
-    samples: &mut [SampleData; S],
+    samples: &mut [[SampleData; S]; TR],
     tile_covered: bool,
 ) where
     U: Copy + Send,
@@ -998,8 +1131,8 @@ fn process_tile<U, T, DF, FS, B, MS, const A: usize, const S: usize>(
 {
     for y in bounds.min.y..bounds.max.y {
         process_row(
-            bounds,
-            shape,
+            bounds.min.x..bounds.max.x,
+            triangles,
             fragment_tools,
             depth_tools,
             multisampler,
@@ -1010,13 +1143,13 @@ fn process_tile<U, T, DF, FS, B, MS, const A: usize, const S: usize>(
     }
 }
 
-fn process_row<U, T, DF, FS, B, MS, const A: usize, const S: usize>(
-    bounds: &Bounds,
-    shape: &[FragmentInput<A>; 3],
+fn process_row<U, T, DF, FS, B, MS, const A: usize, const S: usize, const TR: usize>(
+    x_range: Range<u32>,
+    triangles: &[[FragmentInput<A>; 3]; TR],
     fragment_tools: &UnsafeFragmentTools<U, T, FS, B, A, S>,
     depth_tools: &UnsafeDepthTools<DF, S>,
     multisampler: &MS,
-    samples: &mut [SampleData; S],
+    samples: &mut [[SampleData; S]; TR],
     tile_covered: bool,
     y: u32,
 ) where
@@ -1029,81 +1162,93 @@ fn process_row<U, T, DF, FS, B, MS, const A: usize, const S: usize>(
 {
     let y_offsets = multisampler.y_offsets();
 
-    for i in 0..S {
-        samples[i].compute_row_bary_coords(y as f32 + y_offsets[i]);
+    for triangle_samples in samples.into_iter() {
+        for (sample, &y_offset) in triangle_samples.into_iter().zip(y_offsets.iter()) {
+            sample.compute_row_bary_coords(y as f32 + y_offset);
+        }
     }
 
-    for x in bounds.min.x..bounds.max.x {
+    for x in x_range {
         let ref x_offsets = multisampler.x_offsets(x, y);
 
-        let mut covered_samples = [(0, 0.0); S];
-        let mut covered_samples_len = 0;
-        let mut pixel_center_offset = glam::vec2(0.0, 0.0);
+        let mut pixel_coverages = [PixelCoverage::<S>::default(); TR];
 
-        for i in 0..S {
-            let sample = &mut samples[i];
-            sample.compute_barycentric_coords(x as f32 + x_offsets[i]);
-
-            if tile_covered || sample.is_in_triangle() {
-                let depth = sample.interpolate(
-                    shape[0].position.z,
-                    shape[1].position.z,
-                    shape[2].position.z,
-                );
-                if 0.0 < depth && depth < 1.0 {
-                    let depth_test_passed = unsafe {
-                        (*depth_tools.0).as_ref().map_or(true, |depth_tools| {
-                            depth_tools.compare(x, y, i as u32, depth)
-                        })
-                    };
-                    if depth_test_passed {
-                        unsafe {
-                            *covered_samples.get_unchecked_mut(covered_samples_len) =
-                                (i as u32, depth);
+        for ((triangle_samples, triangle), pixel_coverage) in samples
+            .into_iter()
+            .zip(triangles.into_iter())
+            .zip(pixel_coverages.iter_mut())
+        {
+            for (i, (sample, (&x_offset, &y_offset))) in triangle_samples
+                .into_iter()
+                .zip(x_offsets.into_iter().zip(y_offsets.into_iter()))
+                .enumerate()
+            {
+                sample.compute_barycentric_coords(x as f32 + x_offset);
+                if tile_covered || sample.is_in_triangle() {
+                    let depth = sample.interpolate(
+                        triangle[0].position.z,
+                        triangle[1].position.z,
+                        triangle[2].position.z,
+                    );
+                    if (0.0..1.0).contains(&depth) {
+                        let depth_test_passed = unsafe {
+                            (*depth_tools.0).as_ref().map_or(true, |depth_tools| {
+                                depth_tools.compare(x, y, i as u32, depth)
+                            })
+                        };
+                        if depth_test_passed {
+                            unsafe {
+                                pixel_coverage.push(i as u32, depth);
+                            }
+                            pixel_coverage.add_offset(glam::vec2(x_offset, y_offset));
                         }
-                        covered_samples_len += 1;
-                        pixel_center_offset += glam::vec2(x_offsets[i], y_offsets[i]);
                     }
                 }
             }
         }
 
-        if covered_samples_len != 0 {
-            let mut fragment_sample = samples[0];
-            let xy = glam::vec2(x as f32, y as f32) + pixel_center_offset / covered_samples_len as f32;
-            fragment_sample.compute_row_bary_coords(xy.y);
-            fragment_sample.compute_barycentric_coords(xy.x);
+        for ((triangle_samples, triangle), pixel_coverage) in samples
+            .into_iter()
+            .zip(triangles.into_iter())
+            .zip(pixel_coverages.iter_mut())
+        {
+            if pixel_coverage.count() != 0 {
+                let mut fragment_sample = triangle_samples[0];
+                let xy = glam::vec2(x as f32, y as f32) + pixel_coverage.center_offset();
+                fragment_sample.compute_row_bary_coords(xy.y);
+                fragment_sample.compute_barycentric_coords(xy.x);
 
-            let zw = fragment_sample.interpolate(
-                shape[0].position.zw(),
-                shape[1].position.zw(),
-                shape[2].position.zw(),
-            );
-            let position = (xy, zw).into();
-            let inv_w = 1.0 / zw[1];
-            let attributes = fragment_sample
-                .interpolate_arr(
-                    &shape[0].attributes,
-                    &shape[1].attributes,
-                    &shape[2].attributes,
-                )
-                .map(|attr| attr * inv_w);
-            let fragment_value = unsafe {
-                (*fragment_tools.0).shade_fragment(FragmentInput {
-                    position,
-                    attributes,
-                })
-            };
+                let zw = fragment_sample.interpolate(
+                    triangle[0].position.zw(),
+                    triangle[1].position.zw(),
+                    triangle[2].position.zw(),
+                );
+                let position: glam::Vec4 = (xy, zw).into();
+                let inv_w = 1.0 / position.w;
+                let attributes = fragment_sample
+                    .interpolate_arr(
+                        &triangle[0].attributes,
+                        &triangle[1].attributes,
+                        &triangle[2].attributes,
+                    )
+                    .map(|attr| attr * inv_w);
+                let fragment_value = unsafe {
+                    (*fragment_tools.0).shade_fragment(FragmentInput {
+                        position,
+                        attributes,
+                    })
+                };
 
-            for i in 0..covered_samples_len {
-                unsafe {
-                    let (sample, depth) = *covered_samples.get_unchecked(i);
-                    if let Some(ref mut depth_tools) = *depth_tools.0 {
-                        if depth_tools.depth_state.write_depth {
-                            depth_tools.write(x, y, sample, depth);
+                for i in 0..pixel_coverage.count() {
+                    unsafe {
+                        let (sample, depth) = pixel_coverage.get_coverage_at(i);
+                        if let Some(ref mut depth_tools) = *depth_tools.0 {
+                            if depth_tools.depth_state.write_depth {
+                                depth_tools.write(x, y, sample, depth);
+                            }
                         }
+                        (*fragment_tools.0).blend_and_write(x, y, sample, &fragment_value);
                     }
-                    (*fragment_tools.0).blend_and_write(x, y, sample, &fragment_value);
                 }
             }
         }
