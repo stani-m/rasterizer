@@ -3,6 +3,7 @@ use std::mem;
 use std::num::NonZeroU32;
 
 use pollster::FutureExt;
+use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
 use wgpu::util::DeviceExt;
 
 use crate::{Buffer, Color};
@@ -24,7 +25,7 @@ pub struct WgpuPresenter<'a> {
 impl<'a> WgpuPresenter<'a> {
     pub fn new<W>(window: &W, width: u32, height: u32, vsync: bool) -> Self
     where
-        W: raw_window_handle::HasRawWindowHandle,
+        W: HasRawWindowHandle + HasRawDisplayHandle,
     {
         let instance = wgpu::Instance::new(wgpu::Backends::PRIMARY);
         let surface = unsafe { instance.create_surface(&window) };
@@ -56,6 +57,7 @@ impl<'a> WgpuPresenter<'a> {
             } else {
                 wgpu::PresentMode::Immediate
             },
+            alpha_mode: surface.get_supported_alpha_modes(&adapter)[0],
         };
         surface.configure(&device, &surface_config);
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {

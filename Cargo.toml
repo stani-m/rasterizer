@@ -10,11 +10,11 @@ inherits = "release"
 debug = 1
 
 [dependencies]
-glam = "0.21.2"
-wgpu = { version = "0.13.1", optional = true }
+glam = "0.22.0"
+wgpu = { version = "0.14.0", optional = true }
 pollster = { version = "0.2.5", optional = true }
-raw-window-handle = { version = "0.4.3", optional = true }
-bytemuck = { version = "1.10.0", features = ["derive", "min_const_generics"] }
+raw-window-handle = { version = "0.5.0", optional = true }
+bytemuck = { version = "1.12.1", features = ["derive", "min_const_generics"] }
 rayon-core = "1.9.3"
 rand = { version = "0.8.5", features = ["small_rng"] }
 
@@ -34,5 +34,5 @@ name = "stochastic-aa"
 required-features = ["wgpu_presenter"]
 
 [dev-dependencies]
-winit = "0.26.1"
+winit = "0.27.5"
 gltf = { version = "1.0.0", features = ["names"] }
