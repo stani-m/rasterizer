@@ -1,4 +1,3 @@
-use std::num::NonZeroU32;
 use std::time::Instant;
 
 use winit::dpi::PhysicalSize;
@@ -9,9 +8,7 @@ use winit::window::WindowBuilder;
 
 use model::Model;
 use rasterizer::presenter::WgpuPresenter;
-use rasterizer::rasterizer::{
-    EdgeFunctionTiledRasterizer, EdgeFunctionTiledRasterizerDescriptor, Face,
-};
+use rasterizer::rasterizer::{EdgeFunctionTiledRasterizer, Face};
 use rasterizer::{
     blend_function, clipper, depth_function, Buffer, Color, DepthState, FragmentInput,
     ListShapeAssembler, Pipeline, PipelineDescriptor, StaticMultisampler,
@@ -43,11 +40,7 @@ fn main() {
         },
         shape_assembler: ListShapeAssembler::new(),
         clipper: clipper::simple,
-        rasterizer: EdgeFunctionTiledRasterizer::new(EdgeFunctionTiledRasterizerDescriptor {
-            cull_face: Some(Face::Ccw),
-            tile_size: NonZeroU32::new(32).unwrap(),
-            thread_count: 0,
-        }),
+        rasterizer: EdgeFunctionTiledRasterizer::<16>::new(Some(Face::Ccw), 0),
         depth_state: Some(DepthState {
             depth_function: depth_function::always_pass,
             write_depth: false,

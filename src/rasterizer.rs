@@ -1,9 +1,8 @@
 use std::mem;
-use std::num::NonZeroU32;
 use std::ops::{Add, Mul, Range};
 
 use glam::Vec4Swizzles;
-use rayon_core::{ThreadPool, ThreadPoolBuilder};
+use rayon_core::{Scope, ThreadPool, ThreadPoolBuilder};
 
 use crate::{Buffer, DepthState, FragmentInput, Multisampler};
 
@@ -369,10 +368,10 @@ impl<const A: usize, const S: usize> Rasterizer<2, A, S> for AALineRasterizer {
 
         let bounds = Bounds::from(&[a0, a1, b0, b1]).intersection(self.screen_bounds);
 
-        let u = prepare_static_data(&triangles[0], inv_area);
-        let w = prepare_static_data(&triangles[1], -inv_area);
-
-        let mut samples = [prepare_samples(&u), prepare_samples(&w)];
+        let static_data = [
+            StaticData::new(&triangles[0], inv_area),
+            StaticData::new(&triangles[1], -inv_area),
+        ];
 
         let fragment_tools = &UnsafeFragmentTools(fragment_tools);
         let depth_tools = &UnsafeDepthTools(depth_tools);
@@ -382,13 +381,13 @@ impl<const A: usize, const S: usize> Rasterizer<2, A, S> for AALineRasterizer {
         let rise = to.y - from.y;
 
         if run == 0 || rise == 0 {
-            process_tile(
+            process_bounds(
                 &bounds,
                 &triangles,
                 fragment_tools,
                 depth_tools,
                 multisampler,
-                &mut samples,
+                &static_data,
                 false,
             );
         } else {
@@ -409,13 +408,13 @@ impl<const A: usize, const S: usize> Rasterizer<2, A, S> for AALineRasterizer {
                         max: glam::uvec2(x as u32 + 1, y as u32 + 2),
                     }
                     .intersection(bounds);
-                    process_tile(
+                    process_bounds(
                         &segment,
                         &triangles,
                         fragment_tools,
                         depth_tools,
                         multisampler,
-                        &mut samples,
+                        &static_data,
                         false,
                     );
                     offset += delta;
@@ -436,13 +435,21 @@ impl<const A: usize, const S: usize> Rasterizer<2, A, S> for AALineRasterizer {
                     if (bounds.min.y..bounds.max.y).contains(&(y as u32)) {
                         let x_min = ((x - 1) as u32).clamp(bounds.min.x, bounds.max.x);
                         let x_max = (x as u32 + 2).clamp(bounds.min.x, bounds.max.x);
+
+                        let barycentric_computations = static_data.map(|static_data| {
+                            multisampler
+                                .y_offsets()
+                                .map(|y_offset| static_data.compute_row(y as f32 + y_offset))
+                        });
+
                         process_row(
                             x_min..x_max,
                             &triangles,
                             fragment_tools,
                             depth_tools,
                             multisampler,
-                            &mut samples,
+                            &static_data,
+                            &barycentric_computations,
                             false,
                             y as u32,
                         );
@@ -511,9 +518,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
 
         let bounds = Bounds::from(&triangle).intersection(self.screen_bounds);
 
-        let w = prepare_static_data(&triangle, inv_area);
-
-        let mut samples = [prepare_samples(&w)];
+        let static_data = [StaticData::new(&triangle, inv_area)];
 
         // DepthTools and FragmentTools don't need to be unsafe here but it makes code reuse much easier
         let fragment_tools = &UnsafeFragmentTools(fragment_tools);
@@ -521,13 +526,13 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionRasteri
 
         let triangles = [triangle];
 
-        process_tile(
+        process_bounds(
             &bounds,
             &triangles,
             fragment_tools,
             depth_tools,
             multisampler,
-            &mut samples,
+            &static_data,
             false,
         );
     }
@@ -543,10 +548,7 @@ pub struct EdgeFunctionMTRasterizer {
 impl EdgeFunctionMTRasterizer {
     pub fn new(cull_face: Option<Face>, thread_count: usize) -> Self {
         Self {
-            screen_bounds: Bounds {
-                min: glam::uvec2(0, 0),
-                max: glam::uvec2(0, 0),
-            },
+            screen_bounds: Bounds::default(),
             cull_face,
             thread_pool: ThreadPoolBuilder::new()
                 .num_threads(thread_count)
@@ -585,9 +587,7 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionMTRaste
 
         let bounds = Bounds::from(&triangle).intersection(self.screen_bounds);
 
-        let w = prepare_static_data(&triangle, inv_area);
-
-        let mut samples = [prepare_samples(&w)];
+        let static_data = [StaticData::new(&triangle, inv_area)];
 
         let fragment_tools = &UnsafeFragmentTools(fragment_tools);
         let depth_tools = &UnsafeDepthTools(depth_tools);
@@ -597,13 +597,20 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionMTRaste
         self.thread_pool.in_place_scope(|scope| {
             for y in bounds.min.y..bounds.max.y {
                 scope.spawn(move |_| {
+                    let barycentric_computations = static_data.map(|static_data| {
+                        multisampler
+                            .y_offsets()
+                            .map(|y_offset| static_data.compute_row(y as f32 + y_offset))
+                    });
+
                     process_row(
                         bounds.min.x..bounds.max.x,
                         &triangles,
                         fragment_tools,
                         depth_tools,
                         multisampler,
-                        &mut samples,
+                        &static_data,
+                        &barycentric_computations,
                         false,
                         y,
                     );
@@ -613,87 +620,30 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionMTRaste
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-pub struct EdgeFunctionTiledRasterizerDescriptor {
-    pub cull_face: Option<Face>,
-    pub tile_size: NonZeroU32,
-    pub thread_count: usize,
-}
-
 #[derive(Debug)]
-pub struct EdgeFunctionTiledRasterizer {
+pub struct EdgeFunctionTiledRasterizer<const TS: usize> {
     screen_bounds: Bounds,
     cull_face: Option<Face>,
-    tile_size: NonZeroU32,
     thread_pool: ThreadPool,
 }
 
-impl EdgeFunctionTiledRasterizer {
-    pub fn new(descriptor: EdgeFunctionTiledRasterizerDescriptor) -> Self {
+impl<const TS: usize> EdgeFunctionTiledRasterizer<TS> {
+    pub fn new(cull_face: Option<Face>, thread_count: usize) -> Self {
+        assert_ne!(TS, 0, "tile size cannot be zero");
         Self {
-            screen_bounds: Bounds {
-                min: glam::uvec2(0, 0),
-                max: glam::uvec2(0, 0),
-            },
-            cull_face: descriptor.cull_face,
-            tile_size: descriptor.tile_size,
+            screen_bounds: Bounds::default(),
+            cull_face,
             thread_pool: ThreadPoolBuilder::new()
-                .num_threads(descriptor.thread_count)
+                .num_threads(thread_count)
                 .build()
                 .unwrap(),
         }
     }
-
-    fn check_and_process<U, T, DF, FS, B, MS, const A: usize, const S: usize>(
-        bounds: &Bounds,
-        triangles: &[[FragmentInput<A>; 3]; 1],
-        fragment_tools: &UnsafeFragmentTools<U, T, FS, B, A, S>,
-        depth_tools: &UnsafeDepthTools<DF, S>,
-        multisampler: &MS,
-        samples: &mut [[SampleData; S]; 1],
-        lines: &[Line; 3],
-        points: &[glam::Vec2; 3],
-    ) where
-        U: Copy + Send,
-        T: Copy + Default + Send,
-        DF: Fn(f32, f32) -> bool + Sync,
-        FS: Fn(FragmentInput<A>, U) -> T + Sync,
-        B: Fn(&T, &T) -> T + Sync,
-        MS: Multisampler<S>,
-    {
-        if bounds.intersect_or_contain(&lines, &points) {
-            process_tile(
-                &bounds,
-                &triangles,
-                fragment_tools,
-                depth_tools,
-                multisampler,
-                samples,
-                false,
-            );
-        } else {
-            let mut sample = samples[0][0];
-
-            let middle = bounds.middle();
-            sample.compute_row_bary_coords(middle.y);
-            sample.compute_barycentric_coords(middle.x);
-
-            if sample.is_in_triangle() {
-                process_tile(
-                    &bounds,
-                    &triangles,
-                    fragment_tools,
-                    depth_tools,
-                    multisampler,
-                    samples,
-                    true,
-                );
-            }
-        }
-    }
 }
 
-impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionTiledRasterizer {
+impl<const A: usize, const S: usize, const TS: usize> Rasterizer<3, A, S>
+    for EdgeFunctionTiledRasterizer<TS>
+{
     fn set_screen_size(&mut self, width: u32, height: u32) {
         self.screen_bounds.max = glam::uvec2(width, height);
     }
@@ -721,21 +671,14 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionTiledRa
         let inv_area = -1.0 / area;
 
         let bounds = Bounds::from(&triangle).intersection(self.screen_bounds);
-        let max_tile = bounds.max - (bounds.max - bounds.min) % self.tile_size.get();
+        let y_max_aligned = bounds.max.y - (bounds.max.y - bounds.min.y) % TS as u32;
 
-        let w = prepare_static_data(&triangle, inv_area);
+        let static_data = [StaticData::new(&triangle, inv_area)];
 
-        let mut samples = [prepare_samples(&w)];
-
-        let triangle_lines = [
+        let lines = [
             Line::new(triangle[0].position.xy(), triangle[1].position.xy()),
             Line::new(triangle[1].position.xy(), triangle[2].position.xy()),
             Line::new(triangle[2].position.xy(), triangle[0].position.xy()),
-        ];
-        let triangle_points = [
-            triangle[0].position.xy(),
-            triangle[1].position.xy(),
-            triangle[2].position.xy(),
         ];
 
         let fragment_tools = &UnsafeFragmentTools(fragment_tools);
@@ -744,103 +687,58 @@ impl<const A: usize, const S: usize> Rasterizer<3, A, S> for EdgeFunctionTiledRa
         let triangles = [triangle];
 
         self.thread_pool.in_place_scope(|scope| {
-            for y_min in (bounds.min.y..max_tile.y).step_by(self.tile_size.get() as usize) {
-                let y_max = y_min + self.tile_size.get();
-                for x_min in (bounds.min.x..max_tile.x).step_by(self.tile_size.get() as usize) {
-                    let tile_bounds = Bounds {
-                        min: glam::uvec2(x_min, y_min),
-                        max: glam::uvec2(x_min + self.tile_size.get(), y_max),
-                    };
+            for y_min in (bounds.min.y..y_max_aligned).step_by(TS) {
+                let mut tile_row = bounds;
+                tile_row.min.y = y_min;
+                tile_row.max.y = y_min + TS as u32;
 
-                    scope.spawn(move |_| {
-                        Self::check_and_process(
-                            &tile_bounds,
-                            &triangles,
-                            fragment_tools,
-                            depth_tools,
-                            multisampler,
-                            &mut samples,
-                            &triangle_lines,
-                            &triangle_points,
-                        )
-                    });
-                }
-
-                let tile_bounds = Bounds {
-                    min: glam::uvec2(max_tile.x, y_min),
-                    max: glam::uvec2(bounds.max.x, y_max),
-                };
-
-                scope.spawn(move |_| {
-                    Self::check_and_process(
-                        &tile_bounds,
-                        &triangles,
-                        fragment_tools,
-                        depth_tools,
-                        multisampler,
-                        &mut samples,
-                        &triangle_lines,
-                        &triangle_points,
-                    )
-                });
-            }
-
-            for x_min in (bounds.min.x..max_tile.x).step_by(self.tile_size.get() as usize) {
-                let tile_bounds = Bounds {
-                    min: glam::uvec2(x_min, max_tile.y),
-                    max: glam::uvec2(x_min + self.tile_size.get(), bounds.max.y),
-                };
-
-                scope.spawn(move |_| {
-                    Self::check_and_process(
-                        &tile_bounds,
-                        &triangles,
-                        fragment_tools,
-                        depth_tools,
-                        multisampler,
-                        &mut samples,
-                        &triangle_lines,
-                        &triangle_points,
-                    )
-                });
-            }
-
-            let tile_bounds = Bounds {
-                min: glam::uvec2(max_tile.x, max_tile.y),
-                max: glam::uvec2(bounds.max.x, bounds.max.y),
-            };
-
-            scope.spawn(move |_| {
-                Self::check_and_process(
-                    &tile_bounds,
+                process_bounds_tiled::<U, T, DF, FS, B, MS, A, S, 1, TS>(
+                    scope,
+                    tile_row,
                     &triangles,
                     fragment_tools,
                     depth_tools,
                     multisampler,
-                    &mut samples,
-                    &triangle_lines,
-                    &triangle_points,
-                )
-            });
+                    &static_data,
+                    &lines,
+                );
+            }
+            let mut tile_row = bounds;
+            tile_row.min.y = y_max_aligned;
+
+            process_bounds_tiled::<U, T, DF, FS, B, MS, A, S, 1, TS>(
+                scope,
+                tile_row,
+                &triangles,
+                fragment_tools,
+                depth_tools,
+                multisampler,
+                &static_data,
+                &lines,
+            );
         });
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Default, Debug)]
 struct Bounds {
     min: glam::UVec2,
     max: glam::UVec2,
 }
 
 impl Bounds {
-    fn intersect_or_contain(&self, lines: &[Line; 3], points: &[glam::Vec2; 3]) -> bool {
+    fn intersect_or_contain<const A: usize>(
+        &self,
+        lines: &[Line; 3],
+        triangle: &[FragmentInput<A>; 3],
+    ) -> bool {
         let min_bound = self.min.as_vec2();
         let max_bound = self.max.as_vec2();
         let x_range = min_bound.x..=max_bound.x;
         let y_range = min_bound.y..=max_bound.y;
         let mut contain = true;
-        for (line, point) in lines.into_iter().zip(points.into_iter()) {
-            if !x_range.contains(&point.x) || !y_range.contains(&point.y) {
+        for (line, point) in lines.into_iter().zip(triangle.into_iter()) {
+            if !x_range.contains(&point.position.x) || !y_range.contains(&point.position.y) {
                 contain = false;
             }
             let x1 = line.solve_x(min_bound.y);
@@ -922,62 +820,95 @@ impl Line {
 }
 
 #[derive(Copy, Clone)]
-struct StaticData {
+struct StaticDataComponent {
     base: f32,
     x_delta: f32,
     y_delta: f32,
 }
 
-#[derive(Copy, Clone)]
-struct BarycentricCoordinate<'a> {
-    static_data: &'a StaticData,
-    row_value: f32,
-    value: f32,
-}
-
-impl<'a> BarycentricCoordinate<'a> {
-    fn new(static_data: &'a StaticData) -> Self {
-        Self {
-            static_data,
-            row_value: 0.0,
-            value: 0.0,
-        }
-    }
-
-    fn compute_row(&mut self, y: f32) {
-        self.row_value = self.static_data.y_delta * y + self.static_data.base;
-    }
-
-    fn compute_value(&mut self, x: f32) {
-        self.value = self.static_data.x_delta * x + self.row_value;
+impl StaticDataComponent {
+    fn compute_row(&self, y: f32) -> f32 {
+        self.y_delta * y + self.base
     }
 }
 
 #[derive(Copy, Clone)]
-struct SampleData<'a> {
-    w0: BarycentricCoordinate<'a>,
-    w1: BarycentricCoordinate<'a>,
-    w2: BarycentricCoordinate<'a>,
+struct StaticData(
+    StaticDataComponent,
+    StaticDataComponent,
+    StaticDataComponent,
+);
+
+impl StaticData {
+    fn new<const A: usize>(triangle: &[FragmentInput<A>; 3], inv_area: f32) -> Self {
+        let w0_base = (triangle[1].position.x * triangle[2].position.y
+            - triangle[1].position.y * triangle[2].position.x)
+            * inv_area;
+        let w1_base = (triangle[2].position.x * triangle[0].position.y
+            - triangle[2].position.y * triangle[0].position.x)
+            * inv_area;
+        let w2_base = (triangle[0].position.x * triangle[1].position.y
+            - triangle[0].position.y * triangle[1].position.x)
+            * inv_area;
+
+        let w0_x_delta = (triangle[1].position.y - triangle[2].position.y) * inv_area;
+        let w1_x_delta = (triangle[2].position.y - triangle[0].position.y) * inv_area;
+        let w2_x_delta = (triangle[0].position.y - triangle[1].position.y) * inv_area;
+
+        let w0_y_delta = (triangle[2].position.x - triangle[1].position.x) * inv_area;
+        let w1_y_delta = (triangle[0].position.x - triangle[2].position.x) * inv_area;
+        let w2_y_delta = (triangle[1].position.x - triangle[0].position.x) * inv_area;
+
+        let w0 = StaticDataComponent {
+            base: w0_base,
+            x_delta: w0_x_delta,
+            y_delta: w0_y_delta,
+        };
+        let w1 = StaticDataComponent {
+            base: w1_base,
+            x_delta: w1_x_delta,
+            y_delta: w1_y_delta,
+        };
+        let w2 = StaticDataComponent {
+            base: w2_base,
+            x_delta: w2_x_delta,
+            y_delta: w2_y_delta,
+        };
+
+        Self(w0, w1, w2)
+    }
+
+    fn compute_row(&self, y: f32) -> BarycentricComputations {
+        BarycentricComputations(
+            self.0.compute_row(y),
+            self.1.compute_row(y),
+            self.2.compute_row(y),
+        )
+    }
 }
 
-impl<'a> SampleData<'a> {
-    fn compute_row_bary_coords(&mut self, y: f32) {
-        self.w0.compute_row(y);
-        self.w1.compute_row(y);
-        self.w2.compute_row(y);
-    }
+#[derive(Copy, Clone, Default)]
+struct BarycentricComputations(f32, f32, f32);
 
-    fn compute_barycentric_coords(&mut self, x: f32) {
-        self.w0.compute_value(x);
-        self.w1.compute_value(x);
-        self.w2.compute_value(x);
+impl BarycentricComputations {
+    fn barycentric_coordinates(&self, static_data: &StaticData, x: f32) -> BarycentricCoordinates {
+        BarycentricCoordinates(
+            static_data.0.x_delta * x + self.0,
+            static_data.1.x_delta * x + self.1,
+            static_data.2.x_delta * x + self.2,
+        )
     }
+}
 
+#[derive(Copy, Clone)]
+struct BarycentricCoordinates(f32, f32, f32);
+
+impl BarycentricCoordinates {
     fn interpolate<T>(&self, v0: T, v1: T, v2: T) -> T
     where
         T: Mul<f32, Output = T> + Add<Output = T>,
     {
-        v0 * self.w0.value + v1 * self.w1.value + v2 * self.w2.value
+        v0 * self.0 + v1 * self.1 + v2 * self.2
     }
 
     fn interpolate_arr<T, const N: usize>(&self, a0: &[T; N], a1: &[T; N], a2: &[T; N]) -> [T; N]
@@ -992,14 +923,14 @@ impl<'a> SampleData<'a> {
             .map(|v012_elements| (v012_elements.0 .0, v012_elements.0 .1, v012_elements.1))
             .zip(&mut res_arr)
         {
-            *res_elem = v0_elem * self.w0.value + v1_elem * self.w1.value + v2_elem * self.w2.value;
+            *res_elem = v0_elem * self.0 + v1_elem * self.1 + v2_elem * self.2;
         }
         res_arr
     }
 
-    fn is_in_triangle(&self) -> bool {
-        self.w0.value.to_bits() >> 31 == self.w1.value.to_bits() >> 31
-            && self.w1.value.to_bits() >> 31 == self.w2.value.to_bits() >> 31
+    fn are_in_triangle(&self) -> bool {
+        self.0.to_bits() >> 31 == self.1.to_bits() >> 31
+            && self.1.to_bits() >> 31 == self.2.to_bits() >> 31
     }
 }
 
@@ -1020,55 +951,6 @@ fn skip_triangle(area: f32, cull_face: Option<Face>) -> bool {
         }
     }
     return false;
-}
-
-fn prepare_static_data<const A: usize>(
-    triangle: &[FragmentInput<A>; 3],
-    inv_area: f32,
-) -> (StaticData, StaticData, StaticData) {
-    let w0_base = (triangle[1].position.x * triangle[2].position.y
-        - triangle[1].position.y * triangle[2].position.x)
-        * inv_area;
-    let w1_base = (triangle[2].position.x * triangle[0].position.y
-        - triangle[2].position.y * triangle[0].position.x)
-        * inv_area;
-    let w2_base = (triangle[0].position.x * triangle[1].position.y
-        - triangle[0].position.y * triangle[1].position.x)
-        * inv_area;
-
-    let w0_x_delta = (triangle[1].position.y - triangle[2].position.y) * inv_area;
-    let w1_x_delta = (triangle[2].position.y - triangle[0].position.y) * inv_area;
-    let w2_x_delta = (triangle[0].position.y - triangle[1].position.y) * inv_area;
-
-    let w0_y_delta = (triangle[2].position.x - triangle[1].position.x) * inv_area;
-    let w1_y_delta = (triangle[0].position.x - triangle[2].position.x) * inv_area;
-    let w2_y_delta = (triangle[1].position.x - triangle[0].position.x) * inv_area;
-
-    let w0 = StaticData {
-        base: w0_base,
-        x_delta: w0_x_delta,
-        y_delta: w0_y_delta,
-    };
-    let w1 = StaticData {
-        base: w1_base,
-        x_delta: w1_x_delta,
-        y_delta: w1_y_delta,
-    };
-    let w2 = StaticData {
-        base: w2_base,
-        x_delta: w2_x_delta,
-        y_delta: w2_y_delta,
-    };
-
-    (w0, w1, w2)
-}
-
-fn prepare_samples<const S: usize>(w: &(StaticData, StaticData, StaticData)) -> [SampleData; S] {
-    [SampleData {
-        w0: BarycentricCoordinate::new(&w.0),
-        w1: BarycentricCoordinate::new(&w.1),
-        w2: BarycentricCoordinate::new(&w.2),
-    }; S]
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -1113,14 +995,171 @@ impl<const S: usize> Default for PixelCoverage<S> {
     }
 }
 
-fn process_tile<U, T, DF, FS, B, MS, const A: usize, const S: usize, const TR: usize>(
+fn process_bounds_tiled<
+    'a,
+    'b,
+    U,
+    T,
+    DF,
+    FS,
+    B,
+    MS,
+    const A: usize,
+    const S: usize,
+    const TR: usize,
+    const TS: usize,
+>(
+    scope: &Scope<'a>,
+    bounds: Bounds,
+    triangles: &'b [[FragmentInput<A>; 3]; TR],
+    fragment_tools: &'b UnsafeFragmentTools<U, T, FS, B, A, S>,
+    depth_tools: &'b UnsafeDepthTools<DF, S>,
+    multisampler: &'b MS,
+    static_data: &'b [StaticData; TR],
+    lines: &'b [Line; 3],
+) where
+    'b: 'a,
+    U: Copy + Send,
+    T: Copy + Default + Send,
+    DF: Fn(f32, f32) -> bool + Sync,
+    FS: Fn(FragmentInput<A>, U) -> T + Sync,
+    B: Fn(&T, &T) -> T + Sync,
+    MS: Multisampler<S> + Sync,
+{
+    let mut barycentric_computations = [[[BarycentricComputations::default(); S]; TR]; TS];
+    for (y, barycentric_computations) in
+        (bounds.min.y..bounds.max.y).zip(&mut barycentric_computations)
+    {
+        *barycentric_computations = static_data.map(|static_data| {
+            multisampler
+                .y_offsets()
+                .map(|y_offset| static_data.compute_row(y as f32 + y_offset))
+        });
+    }
+
+    let x_max_aligned = bounds.max.x - (bounds.max.x - bounds.min.x) % TS as u32;
+    for x_min in (bounds.min.x..x_max_aligned).step_by(TS) {
+        let tile_bounds = Bounds {
+            min: glam::uvec2(x_min, bounds.min.y),
+            max: glam::uvec2(x_min + TS as u32, bounds.max.y),
+        };
+
+        check_and_process(
+            scope,
+            tile_bounds,
+            &triangles,
+            fragment_tools,
+            depth_tools,
+            multisampler,
+            static_data,
+            barycentric_computations,
+            lines,
+        )
+    }
+
+    let tile_bounds = Bounds {
+        min: glam::uvec2(x_max_aligned, bounds.min.y),
+        max: glam::uvec2(bounds.max.x, bounds.max.y),
+    };
+
+    check_and_process(
+        scope,
+        tile_bounds,
+        &triangles,
+        fragment_tools,
+        depth_tools,
+        multisampler,
+        static_data,
+        barycentric_computations,
+        lines,
+    )
+}
+
+fn check_and_process<
+    'a,
+    'b,
+    U,
+    T,
+    DF,
+    FS,
+    B,
+    MS,
+    const A: usize,
+    const S: usize,
+    const TR: usize,
+    const TS: usize,
+>(
+    scope: &Scope<'a>,
+    bounds: Bounds,
+    triangles: &'b [[FragmentInput<A>; 3]; TR],
+    fragment_tools: &'b UnsafeFragmentTools<U, T, FS, B, A, S>,
+    depth_tools: &'b UnsafeDepthTools<DF, S>,
+    multisampler: &'b MS,
+    static_data: &'b [StaticData; TR],
+    barycentric_computations: [[[BarycentricComputations; S]; TR]; TS],
+    lines: &'b [Line; 3],
+) where
+    'b: 'a,
+    U: Copy + Send,
+    T: Copy + Default + Send,
+    DF: Fn(f32, f32) -> bool + Sync,
+    FS: Fn(FragmentInput<A>, U) -> T + Sync,
+    B: Fn(&T, &T) -> T + Sync,
+    MS: Multisampler<S> + Sync,
+{
+    if triangles
+        .iter()
+        .any(|triangle| bounds.intersect_or_contain(&lines, &triangle))
+    {
+        scope.spawn(move |_| {
+            process_bounds_with_samples(
+                &bounds,
+                &triangles,
+                fragment_tools,
+                depth_tools,
+                multisampler,
+                static_data,
+                &barycentric_computations,
+                false,
+            );
+        });
+    } else {
+        let middle = bounds.middle();
+
+        let barycentric_coordinates = static_data.map(|static_data| {
+            static_data
+                .compute_row(middle.y)
+                .barycentric_coordinates(&static_data, middle.x)
+        });
+
+        if barycentric_coordinates
+            .iter()
+            .any(|barycentric_coordinates| barycentric_coordinates.are_in_triangle())
+        {
+            scope.spawn(move |_| {
+                process_bounds_with_samples(
+                    &bounds,
+                    &triangles,
+                    fragment_tools,
+                    depth_tools,
+                    multisampler,
+                    static_data,
+                    &barycentric_computations,
+                    true,
+                );
+            });
+        }
+    }
+}
+
+fn process_bounds<U, T, DF, FS, B, MS, const A: usize, const S: usize, const TR: usize>(
     bounds: &Bounds,
     triangles: &[[FragmentInput<A>; 3]; TR],
     fragment_tools: &UnsafeFragmentTools<U, T, FS, B, A, S>,
     depth_tools: &UnsafeDepthTools<DF, S>,
     multisampler: &MS,
-    samples: &mut [[SampleData; S]; TR],
-    tile_covered: bool,
+    static_data: &[StaticData; TR],
+    bounds_covered: bool,
 ) where
     U: Copy + Send,
     T: Copy + Default + Send,
@@ -1130,14 +1169,65 @@ fn process_tile<U, T, DF, FS, B, MS, const A: usize, const S: usize, const TR: u
     MS: Multisampler<S>,
 {
     for y in bounds.min.y..bounds.max.y {
+        let barycentric_computations = static_data.map(|static_data| {
+            multisampler
+                .y_offsets()
+                .map(|y_offset| static_data.compute_row(y as f32 + y_offset))
+        });
+
         process_row(
             bounds.min.x..bounds.max.x,
             triangles,
             fragment_tools,
             depth_tools,
             multisampler,
-            samples,
-            tile_covered,
+            static_data,
+            &barycentric_computations,
+            bounds_covered,
+            y,
+        );
+    }
+}
+
+fn process_bounds_with_samples<
+    U,
+    T,
+    DF,
+    FS,
+    B,
+    MS,
+    const A: usize,
+    const S: usize,
+    const TR: usize,
+    const TS: usize,
+>(
+    bounds: &Bounds,
+    triangles: &[[FragmentInput<A>; 3]; TR],
+    fragment_tools: &UnsafeFragmentTools<U, T, FS, B, A, S>,
+    depth_tools: &UnsafeDepthTools<DF, S>,
+    multisampler: &MS,
+    static_data: &[StaticData; TR],
+    barycentric_computations: &[[[BarycentricComputations; S]; TR]; TS],
+    bounds_covered: bool,
+) where
+    U: Copy + Send,
+    T: Copy + Default + Send,
+    DF: Fn(f32, f32) -> bool + Sync,
+    FS: Fn(FragmentInput<A>, U) -> T + Sync,
+    B: Fn(&T, &T) -> T + Sync,
+    MS: Multisampler<S>,
+{
+    for (y, barycentric_computations) in (bounds.min.y..bounds.max.y).zip(barycentric_computations)
+    {
+        process_row(
+            bounds.min.x..bounds.max.x,
+            triangles,
+            fragment_tools,
+            depth_tools,
+            multisampler,
+            static_data,
+            barycentric_computations,
+            bounds_covered,
             y,
         );
     }
@@ -1149,8 +1239,9 @@ fn process_row<U, T, DF, FS, B, MS, const A: usize, const S: usize, const TR: us
     fragment_tools: &UnsafeFragmentTools<U, T, FS, B, A, S>,
     depth_tools: &UnsafeDepthTools<DF, S>,
     multisampler: &MS,
-    samples: &mut [[SampleData; S]; TR],
-    tile_covered: bool,
+    static_data: &[StaticData; TR],
+    barycentric_computations: &[[BarycentricComputations; S]; TR],
+    row_covered: bool,
     y: u32,
 ) where
     U: Copy + Send,
@@ -1160,32 +1251,27 @@ fn process_row<U, T, DF, FS, B, MS, const A: usize, const S: usize, const TR: us
     B: Fn(&T, &T) -> T + Sync,
     MS: Multisampler<S>,
 {
-    let y_offsets = multisampler.y_offsets();
-
-    for triangle_samples in samples.into_iter() {
-        for (sample, &y_offset) in triangle_samples.into_iter().zip(y_offsets.iter()) {
-            sample.compute_row_bary_coords(y as f32 + y_offset);
-        }
-    }
-
     for x in x_range {
         let ref x_offsets = multisampler.x_offsets(x, y);
 
         let mut pixel_coverages = [PixelCoverage::<S>::default(); TR];
 
-        for ((triangle_samples, triangle), pixel_coverage) in samples
-            .into_iter()
-            .zip(triangles.into_iter())
-            .zip(pixel_coverages.iter_mut())
+        for (((barycentric_computations, static_data), triangle), pixel_coverage) in
+            barycentric_computations
+                .iter()
+                .zip(static_data)
+                .zip(triangles)
+                .zip(pixel_coverages.iter_mut())
         {
-            for (i, (sample, (&x_offset, &y_offset))) in triangle_samples
-                .into_iter()
-                .zip(x_offsets.into_iter().zip(y_offsets.into_iter()))
+            for (i, (barycentric_computations, (&x_offset, &y_offset))) in barycentric_computations
+                .iter()
+                .zip(x_offsets.iter().zip(multisampler.y_offsets()))
                 .enumerate()
             {
-                sample.compute_barycentric_coords(x as f32 + x_offset);
-                if tile_covered || sample.is_in_triangle() {
-                    let depth = sample.interpolate(
+                let barycentric_coordinates = barycentric_computations
+                    .barycentric_coordinates(static_data, x as f32 + x_offset);
+                if row_covered || barycentric_coordinates.are_in_triangle() {
+                    let depth = barycentric_coordinates.interpolate(
                         triangle[0].position.z,
                         triangle[1].position.z,
                         triangle[2].position.z,
@@ -1207,25 +1293,25 @@ fn process_row<U, T, DF, FS, B, MS, const A: usize, const S: usize, const TR: us
             }
         }
 
-        for ((triangle_samples, triangle), pixel_coverage) in samples
-            .into_iter()
-            .zip(triangles.into_iter())
+        for ((static_data, triangle), pixel_coverage) in static_data
+            .iter()
+            .zip(triangles)
             .zip(pixel_coverages.iter_mut())
         {
             if pixel_coverage.count() != 0 {
-                let mut fragment_sample = triangle_samples[0];
                 let xy = glam::vec2(x as f32, y as f32) + pixel_coverage.center_offset();
-                fragment_sample.compute_row_bary_coords(xy.y);
-                fragment_sample.compute_barycentric_coords(xy.x);
+                let barycentric_coordinates = static_data
+                    .compute_row(xy.y)
+                    .barycentric_coordinates(&static_data, xy.x);
 
-                let zw = fragment_sample.interpolate(
+                let zw = barycentric_coordinates.interpolate(
                     triangle[0].position.zw(),
                     triangle[1].position.zw(),
                     triangle[2].position.zw(),
                 );
                 let position: glam::Vec4 = (xy, zw).into();
                 let inv_w = 1.0 / position.w;
-                let attributes = fragment_sample
+                let attributes = barycentric_coordinates
                     .interpolate_arr(
                         &triangle[0].attributes,
                         &triangle[1].attributes,

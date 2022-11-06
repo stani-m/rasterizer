@@ -31,7 +31,7 @@ impl<T: Copy, const S: usize> Buffer<T, S> {
     }
 
     pub fn new_with(width: u32, height: u32, value: T) -> Self {
-        assert!(S > 0, "buffer cannot have 0 samples");
+        assert_ne!(S, 0, "buffer cannot have 0 samples");
         Self {
             data: vec![[value; S]; (width * height) as usize],
             width,
