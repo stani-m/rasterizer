@@ -8,15 +8,18 @@ edition = "2021"
 [profile.release-debuginfo]
 inherits = "release"
 debug = 1
+lto = "fat"
+codegen-units = 1
 
 [dependencies]
-glam = "0.22.0"
-wgpu = { version = "0.14.0", optional = true }
-pollster = { version = "0.2.5", optional = true }
-raw-window-handle = { version = "0.5.0", optional = true }
-bytemuck = { version = "1.12.1", features = ["derive", "min_const_generics"] }
-rayon-core = "1.9.3"
+glam = "0.24.0"
+wgpu = { version = "0.16.1", optional = true }
+pollster = { version = "0.3.0", optional = true }
+raw-window-handle = { version = "0.5.2", optional = true }
+bytemuck = { version = "1.13.1", features = ["derive", "min_const_generics"] }
+rayon-core = "1.11.0"
 rand = { version = "0.8.5", features = ["small_rng"] }
+image = { version = "0.24.6", optional = true }
 
 [features]
 wgpu_presenter = ["wgpu", "pollster", "raw-window-handle"]
@@ -26,13 +29,17 @@ name = "lines"
 required-features = ["wgpu_presenter"]
 
 [[example]]
-name = "triangles"
+name = "clipping"
 required-features = ["wgpu_presenter"]
 
 [[example]]
 name = "stochastic-aa"
 required-features = ["wgpu_presenter"]
 
+[[example]]
+name = "phong"
+required-features = ["wgpu_presenter"]
+
 [dev-dependencies]
-winit = "0.27.5"
-gltf = { version = "1.0.0", features = ["names"] }
+winit = "0.28.6"
+gltf = { version = "1.2.0", features = ["names"] }

@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 use std::mem;
-use std::num::NonZeroU32;
 
 use pollster::FutureExt;
 use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
@@ -27,8 +26,8 @@ impl<'a> WgpuPresenter<'a> {
     where
         W: HasRawWindowHandle + HasRawDisplayHandle,
     {
-        let instance = wgpu::Instance::new(wgpu::Backends::PRIMARY);
-        let surface = unsafe { instance.create_surface(&window) };
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+        let surface = unsafe { instance.create_surface(&window).unwrap() };
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::LowPower,
@@ -57,7 +56,8 @@ impl<'a> WgpuPresenter<'a> {
             } else {
                 wgpu::PresentMode::Immediate
             },
-            alpha_mode: surface.get_supported_alpha_modes(&adapter)[0],
+            alpha_mode: surface.get_capabilities(&adapter).alpha_modes[0],
+            view_formats: vec![],
         };
         surface.configure(&device, &surface_config);
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -88,6 +88,7 @@ impl<'a> WgpuPresenter<'a> {
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba32Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
         };
         let texture = device.create_texture(&texture_descriptor);
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -250,10 +251,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             framebuffer.as_u8_slice(),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: NonZeroU32::new(
-                    framebuffer.width() * mem::size_of::<Color>() as u32,
-                ),
-                rows_per_image: NonZeroU32::new(framebuffer.height()),
+                bytes_per_row: Some(framebuffer.width() * mem::size_of::<Color>() as u32),
+                rows_per_image: Some(framebuffer.height()),
             },
             wgpu::Extent3d {
                 width: framebuffer.width(),

@@ -1,6 +1,7 @@
-use std::fmt::Debug;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::iter::Sum;
-use std::ops::{Add, Div, Index, IndexMut};
+use std::ops::{Add, Div, Index, IndexMut, Mul, Sub};
 
 use glam::Vec4Swizzles;
 use rand::rngs::SmallRng;
@@ -78,7 +79,7 @@ impl<T: Copy, const S: usize> Buffer<T, S> {
     {
         assert!(
             self.width == dst.width && self.height == dst.height,
-            "resolving buffers with different dimmensions not supported"
+            "resolving buffers with different dimmensions not supported",
         );
         for (&src, dst) in self.data.iter().zip(&mut dst.data) {
             let average = src.into_iter().sum::<T>() / S as f32;
@@ -90,7 +91,30 @@ impl<T: Copy, const S: usize> Buffer<T, S> {
     where
         T: bytemuck::Pod + bytemuck::Zeroable,
     {
-        bytemuck::cast_slice(self.data.as_slice())
+        bytemuck::cast_slice(self.as_slice())
+    }
+}
+
+impl Buffer<Color> {
+    pub fn as_f32_slice(&self) -> &[f32] {
+        bytemuck::cast_slice(self.as_slice())
+    }
+}
+
+#[cfg(feature = "image")]
+use {image::ImageError, std::path::Path};
+
+#[cfg(feature = "image")]
+impl Buffer<Color> {
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), ImageError> {
+        let image_buffer = image::Rgba32FImage::from_raw(
+            self.width(),
+            self.height(),
+            self.as_f32_slice().to_vec(),
+        )
+        .unwrap();
+        let dynamic_image = image::DynamicImage::ImageRgba32F(image_buffer).flipv();
+        dynamic_image.to_rgba8().save(path)
     }
 }
 
@@ -153,6 +177,16 @@ pub struct Color {
     pub a: f32,
 }
 
+#[rustfmt::skip]
+impl Color {
+    pub const TRANSPARENT: Self = Self { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    pub const BLACK: Self       = Self { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+    pub const WHITE: Self       = Self { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+    pub const RED: Self         = Self { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+    pub const GREEN: Self       = Self { r: 0.0, g: 1.0, b: 0.0, a: 1.0 };
+    pub const BLUE: Self        = Self { r: 0.0, g: 0.0, b: 1.0, a: 1.0 };
+}
+
 impl Color {
     pub const fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self { r, g, b, a }
@@ -195,7 +229,9 @@ impl Div<f32> for Color {
 
 impl Sum for Color {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(Self::default(), |color1, color2| color1 + color2)
+        iter.fold(Color::new(0.0, 0.0, 0.0, 0.0), |color1, color2| {
+            color1 + color2
+        })
     }
 }
 
@@ -233,41 +269,18 @@ impl From<Color> for [f32; 4] {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-pub struct DepthState<DF> {
-    pub depth_function: DF,
+#[derive(Copy, Clone)]
+pub struct DepthState {
+    pub depth_function: fn(&f32, &f32) -> bool,
     pub write_depth: bool,
 }
 
-pub mod depth_function {
-    #[inline]
-    pub fn less_or_equal(src: f32, dst: f32) -> bool {
-        dst >= src
-    }
-
-    #[inline]
-    pub fn less(src: f32, dst: f32) -> bool {
-        dst > src
-    }
-
-    #[inline]
-    pub fn greater_or_equal(src: f32, dst: f32) -> bool {
-        dst <= src
-    }
-
-    #[inline]
-    pub fn greater(src: f32, dst: f32) -> bool {
-        dst < src
-    }
-    #[inline]
-
-    pub fn always_pass(_: f32, _: f32) -> bool {
-        true
-    }
-
-    #[inline]
-    pub fn always_fail(_: f32, _: f32) -> bool {
-        false
+impl Debug for DepthState {
+    fn fmt<'a>(&'a self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("DepthState")
+            .field(&self.depth_function as &fn(&'a f32, &'a f32) -> bool)
+            .field(&self.write_depth)
+            .finish()
     }
 }
 
@@ -337,15 +350,16 @@ impl<const S: usize> StaticMultisampler<S> {
                         y_offsets[count] = y as f32 * step + step * 0.5;
                         count += 1;
                     } else {
-                        panic!("number of samples in sample pattern not equal to map size");
+                        panic!("number of samples in sample pattern not equal to pattern size");
                     }
                 }
             }
         }
 
-        if count != S {
-            panic!("number of samples in sample pattern not equal to map size");
-        }
+        assert_eq!(
+            count, S,
+            "number of samples in sample pattern not equal to pattern size",
+        );
 
         Self {
             x_offsets,
@@ -443,39 +457,38 @@ impl<const S: usize> Multisampler<S> for StochasticMultisampler<S> {
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct PipelineDescriptor<VS, SA, C, R, DF, FS, B, MS, const S: usize> {
+pub struct PipelineDescriptor<VS, SA, C, R, FS, B, MS> {
     pub vertex_shader: VS,
     pub shape_assembler: SA,
     pub clipper: C,
     pub rasterizer: R,
-    pub depth_state: Option<DepthState<DF>>,
+    pub depth_state: Option<DepthState>,
     pub fragment_shader: FS,
     pub blend_function: B,
     pub multisampler: MS,
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct Pipeline<VS, SA, C, R, DF, FS, B, MS, const A: usize, const V: usize, const S: usize> {
+pub struct Pipeline<VS, SA, C, R, FS, B, MS, const A: usize, const N: usize, const S: usize> {
     vertex_shader: VS,
     shape_assembler: SA,
     clipper: C,
     rasterizer: R,
-    depth_state: Option<DepthState<DF>>,
+    depth_state: Option<DepthState>,
     fragment_shader: FS,
     blend_function: B,
     multisampler: MS,
 }
 
-impl<VS, SA, C, R, DF, FS, B, MS, const A: usize, const V: usize, const S: usize>
-    Pipeline<VS, SA, C, R, DF, FS, B, MS, A, V, S>
+impl<VS, SA, C, R, FS, B, MS, const A: usize, const N: usize, const S: usize>
+    Pipeline<VS, SA, C, R, FS, B, MS, A, N, S>
 where
-    SA: ShapeAssembler<u32, V>,
-    C: FnMut([FragmentInput<A>; V]) -> Vec<[FragmentInput<A>; V]>,
-    R: Rasterizer<V, A, S>,
-    DF: Fn(f32, f32) -> bool + Sync,
+    SA: ShapeAssembler<u32, N>,
+    C: FnMut([UnshadedFragment<A>; N]) -> Vec<[UnshadedFragment<A>; N]>,
+    R: Rasterizer<N, A, S>,
     MS: Multisampler<S> + Sync,
 {
-    pub fn new(descriptor: PipelineDescriptor<VS, SA, C, R, DF, FS, B, MS, S>) -> Self {
+    pub fn new(descriptor: PipelineDescriptor<VS, SA, C, R, FS, B, MS>) -> Self {
         Self {
             vertex_shader: descriptor.vertex_shader,
             shape_assembler: descriptor.shape_assembler,
@@ -499,23 +512,23 @@ where
         VI: Copy,
         U: Copy + Send,
         T: Copy + Default + Send,
-        VS: Fn(VI, U) -> FragmentInput<A>,
-        FS: Fn(FragmentInput<A>, U) -> T + Sync,
+        VS: Fn(VI, U) -> UnshadedFragment<A>,
+        FS: Fn(UnshadedFragment<A>, U) -> T + Sync,
         B: Fn(&T, &T) -> T + Sync,
     {
         assert!(
             !(self.depth_state.is_some() && depth_buffer.is_none()),
-            "cannot draw using pipeline that requires depth buffer without a depth buffer"
+            "cannot draw using pipeline that requires depth buffer without a depth buffer",
         );
         let width = render_buffer.width();
         let height = render_buffer.height();
 
-        let perspective_divide = |shape: [FragmentInput<A>; V]| {
+        let perspective_divide = |shape: [UnshadedFragment<A>; N]| {
             shape.map(|vertex| {
                 let inv_w = 1.0 / vertex.position.w;
                 let position: glam::Vec4 = (vertex.position.xyz() * inv_w, inv_w).into();
                 let xy = (position.xy() + 1.0) * glam::vec2(width as f32, height as f32) / 2.0;
-                FragmentInput {
+                UnshadedFragment {
                     position: (xy, position.zw()).into(),
                     attributes: vertex.attributes.map(|attribute| attribute * inv_w),
                 }
@@ -526,20 +539,25 @@ where
             uniforms,
             fragment_shader: &self.fragment_shader,
             blend_function: &self.blend_function,
-            render_buffer: render_buffer,
+            render_buffer,
         };
 
         let mut depth_tools = if let Some(depth_state) = &self.depth_state {
+            let depth_buffer = depth_buffer.unwrap();
+            assert!(
+                width == depth_buffer.width() && height == depth_buffer.height(),
+                "render_buffer and depth_buffer size mismatch",
+            );
             Some(DepthTools {
                 depth_state,
-                depth_buffer: depth_buffer.unwrap(),
+                depth_buffer,
             })
         } else {
             None
         };
 
-        self.rasterizer.set_screen_size(width, height);
-        let shaded_vertices = vertex_buffer
+        self.rasterizer.set_framebuffer_size(width, height);
+        let unshaded_fragments = vertex_buffer
             .into_iter()
             .map(|&vertex| (self.vertex_shader)(vertex, uniforms))
             .collect::<Vec<_>>();
@@ -547,9 +565,8 @@ where
             .into_iter()
             .map(u32::to_owned)
             .assemble_shapes(self.shape_assembler)
-            .map(|shape| shape.map(|i| shaded_vertices[i as usize]))
-            .map(|shape| (self.clipper)(shape).into_iter())
-            .flatten()
+            .map(|shape| shape.map(|i| unshaded_fragments[i as usize]))
+            .flat_map(|shape| (self.clipper)(shape).into_iter())
             .map(perspective_divide)
             .for_each(|shape| {
                 self.rasterizer.rasterize(
@@ -564,22 +581,22 @@ where
     pub fn draw<VI, U, T>(
         &mut self,
         vertex_buffer: &[VI],
-        unforms: U,
+        uniforms: U,
         render_buffer: &mut Buffer<T, S>,
         depth_buffer: Option<&mut Buffer<f32, S>>,
     ) where
         VI: Copy,
         U: Copy + Send,
         T: Copy + Default + Send,
-        VS: Fn(VI, U) -> FragmentInput<A>,
-        FS: Fn(FragmentInput<A>, U) -> T + Sync,
+        VS: Fn(VI, U) -> UnshadedFragment<A>,
+        FS: Fn(UnshadedFragment<A>, U) -> T + Sync,
         B: Fn(&T, &T) -> T + Sync,
     {
         let index_buffer = (0..vertex_buffer.len() as u32).collect::<Vec<_>>();
         self.draw_indexed(
             vertex_buffer,
             &index_buffer,
-            unforms,
+            uniforms,
             render_buffer,
             depth_buffer,
         );
@@ -587,9 +604,50 @@ where
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct FragmentInput<const A: usize = 0> {
+pub struct UnshadedFragment<const A: usize = 0> {
     pub position: glam::Vec4,
     pub attributes: [f32; A],
+}
+
+impl<const A: usize> Add for UnshadedFragment<A> {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        let mut attributes = [0.0; A];
+        for i in 0..A {
+            attributes[i] = self.attributes[i] + rhs.attributes[i];
+        }
+        Self {
+            position: self.position + rhs.position,
+            attributes,
+        }
+    }
+}
+
+impl<const A: usize> Sub for UnshadedFragment<A> {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        let mut attributes = [0.0; A];
+        for i in 0..A {
+            attributes[i] = self.attributes[i] - rhs.attributes[i];
+        }
+        Self {
+            position: self.position - rhs.position,
+            attributes,
+        }
+    }
+}
+
+impl<const A: usize> Mul<f32> for UnshadedFragment<A> {
+    type Output = Self;
+
+    fn mul(self, rhs: f32) -> Self::Output {
+        Self {
+            position: self.position * rhs,
+            attributes: self.attributes.map(|attr| attr * rhs),
+        }
+    }
 }
 
 pub trait ShapeAssembler<V: Copy, const N: usize>: Copy {

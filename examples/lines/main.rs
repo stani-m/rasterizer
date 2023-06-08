@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use winit::dpi::PhysicalSize;
-use winit::event::{Event, WindowEvent};
+use winit::event::{Event, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::platform::run_return::EventLoopExtRunReturn;
 use winit::window::WindowBuilder;
@@ -10,8 +10,8 @@ use model::Model;
 use rasterizer::presenter::WgpuPresenter;
 use rasterizer::rasterizer::BresenhamLineRasterizer;
 use rasterizer::{
-    blend_function, clipper, depth_function, Buffer, Color, DepthState, FragmentInput,
-    ListShapeAssembler, Pipeline, PipelineDescriptor, StaticMultisampler,
+    blend_function, clipper, Buffer, Color, DepthState, ListShapeAssembler, Pipeline,
+    PipelineDescriptor, StaticMultisampler, UnshadedFragment,
 };
 
 #[path = "../model.rs"]
@@ -33,7 +33,7 @@ fn main() {
     let mut pipeline = Pipeline::new(PipelineDescriptor {
         vertex_shader: |vertex, (transform, _)| {
             let position: glam::Vec4 = (vertex, 1.0).into();
-            FragmentInput {
+            UnshadedFragment {
                 position: transform * position,
                 attributes: [],
             }
@@ -42,7 +42,7 @@ fn main() {
         clipper: clipper::simple,
         rasterizer: BresenhamLineRasterizer::new(),
         depth_state: Some(DepthState {
-            depth_function: depth_function::less_or_equal,
+            depth_function: f32::le,
             write_depth: true,
         }),
         fragment_shader: |_, (_, color)| color,
@@ -55,7 +55,8 @@ fn main() {
     let mut donut = Model::new(&document, &buffers[0]);
     donut.transform_triangles_to_lines();
 
-    let zoom = glam::Mat4::from_scale(glam::vec3(20.0, 20.0, 20.0));
+    let mut zoom_amount = 20.0;
+    let mut zoom = glam::Mat4::from_scale(glam::vec3(zoom_amount, zoom_amount, zoom_amount));
     let view = glam::Mat4::look_at_lh(
         glam::vec3(1.0, 2.0, 3.0),
         glam::vec3(0.0, 0.0, 0.0),
@@ -91,6 +92,15 @@ fn main() {
                 );
                 camera = projection * view * zoom;
             }
+            WindowEvent::MouseWheel { delta, .. } => match delta {
+                MouseScrollDelta::LineDelta(_, y) => {
+                    zoom_amount = (zoom_amount + y).max(0.0);
+                    zoom =
+                        glam::Mat4::from_scale(glam::vec3(zoom_amount, zoom_amount, zoom_amount));
+                    camera = projection * view * zoom;
+                }
+                _ => {}
+            },
             _ => (),
         },
         Event::MainEventsCleared => {
@@ -112,7 +122,7 @@ fn main() {
             );
             donut.rotation *= rotate;
 
-            render_buffer.fill(Color::default());
+            render_buffer.fill(Color::BLACK);
             depth_buffer.fill(1.0);
             let transform = camera * donut.model_matrix();
             pipeline.draw_indexed(
